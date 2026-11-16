@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dosis Hidroponia</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Dosis Hidro">
+<meta name="theme-color" content="#eef3f1">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<style>
+:root {
+  --bg: #eef3f1; --surface: #ffffff; --ink: #12302b; --muted: #5a716c; --line: #d3dfdb; --accent: #1f8a5b; --err: #b3261e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1716; --surface: #15221f; --ink: #e3eeea; --muted: #93a8a3; --line: #263834; --accent: #4cc48b; --err: #ff8a80; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif; font-size: 16px;
+  display: grid; place-items: center;
+  padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+}
+form { width: 100%; max-width: 360px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+img { width: 64px; height: 64px; border-radius: 14px; }
+h1 { margin: 0; font-size: 1.4rem; }
+p { margin: 0; color: var(--muted); font-size: .92rem; }
+input[type=password] { font: inherit; font-size: 1.1rem; padding: 12px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+label.rem { display: flex; gap: 10px; align-items: center; font-size: .92rem; }
+label.rem input { width: 20px; height: 20px; accent-color: var(--accent); }
+button { font: inherit; font-weight: 600; padding: 12px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; }
+button:disabled { opacity: .6; }
+input:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.err { color: var(--err); font-size: .9rem; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<form id="f" hidden>
+  <img src="icons/icon-192.png" alt="">
+  <h1>Dosis Hidroponia</h1>
+  <p>Ingresá la contraseña para abrir la calculadora.</p>
+  <input id="pw" type="password" autocomplete="current-password" aria-label="Contraseña" required>
+  <label class="rem"><input id="rem" type="checkbox" checked> Recordar en este celular</label>
+  <button id="go" type="submit">Entrar</button>
+  <div class="err" id="err" role="alert"></div>
+</form>
+<script>
+(function () {
+  var P = __PAYLOAD__;
+  var KEY = 'hidro-key';
+  function b64(s) { var b = atob(s), u = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+  function tob64(buf) { var u = new Uint8Array(buf), s = ''; for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); }
+
+  function derive(pw) {
+    return crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']).then(function (k) {
+      return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: b64(P.salt), iterations: P.iter, hash: 'SHA-256' }, k, 256);
+    });
+  }
+  function open(raw) {
+    return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']).then(function (k) {
+      return crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(P.iv) }, k, b64(P.ct));
+    }).then(function (pt) { return new TextDecoder().decode(pt); });
+  }
+  function show(html) { document.open(); document.write(html); document.close(); }
+
+  if ('serviceWorker' in navigator) { navigator.serviceWorker.register('sw.js').catch(function () {}); }
+
+  var f = document.getElementById('f'), err = document.getElementById('err'), go = document.getElementById('go');
+  function showForm() { f.hidden = false; document.getElementById('pw').focus(); }
+
+  var saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (e) {}
+  if (saved) {
+    open(b64(saved)).then(show, function () { try { localStorage.removeItem(KEY); } catch (e) {} showForm(); });
+  } else { showForm(); }
+
+  f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    err.textContent = ''; go.disabled = true; go.textContent = 'Abriendo…';
+    var pw = document.getElementById('pw').value;
+    var remember = document.getElementById('rem').checked;
+    derive(pw).then(function (raw) {
+      return open(raw).then(function (html) {
+        try { if (remember) localStorage.setItem(KEY, tob64(raw)); } catch (e2) {}
+        show(html);
+      });
+    }).catch(function () {
+      go.disabled = false; go.textContent = 'Entrar';
+      err.textContent = 'Contraseña incorrecta. Probá de nuevo.';
+    });
+  });
+})();
+</script>
+</body>
+</html>
