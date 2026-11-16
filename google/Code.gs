@@ -100,6 +100,21 @@ function doPost(e) {
     });
   }
 
+  // Registro de un día (para todos): movimientos entre from y to
+  if (b.action === 'day') {
+    const s = SS.getSheetByName('Mediciones');
+    if (!s || s.getLastRow() < 2) return out_({ ok: true, rows: [] });
+    const from = new Date(b.from), to = new Date(b.to);
+    const n = s.getLastRow();
+    const start = Math.max(2, n - 1499);
+    const vals = s.getRange(start, 1, n - start + 1, 10).getValues();
+    return out_({
+      ok: true,
+      rows: vals.filter((r) => r[0] instanceof Date && r[0] >= from && r[0] < to)
+        .map((r) => ({ time: r[0], tank: r[1], user: r[2], summary: r[8], status: r[9] })),
+    });
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
