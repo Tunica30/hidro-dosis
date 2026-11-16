@@ -5,6 +5,7 @@ La contraseña se pide por teclado y no se guarda en ningún lado.
 """
 import base64
 import getpass
+import hashlib
 import json
 import os
 import sys
@@ -25,9 +26,24 @@ def main():
     if getpass.getpass("Repetila: ") != pw:
         sys.exit("No coinciden. No se generó nada.")
 
+    print("\nAhora la contraseña de AJUSTES (solo para vos, distinta de la anterior).")
+    admin = getpass.getpass("Contraseña de ajustes: ")
+    if len(admin) < 4:
+        sys.exit("Usá al menos 4 caracteres.")
+    if getpass.getpass("Repetila: ") != admin:
+        sys.exit("No coinciden. No se generó nada.")
+    if admin == pw:
+        sys.exit("Tiene que ser distinta de la contraseña de la app. No se generó nada.")
+
+    admin_salt = os.urandom(16).hex()
+    admin_hash = hashlib.sha256((admin_salt + admin).encode("utf-8")).hexdigest()
+    app = (ROOT / "src" / "app.html").read_text(encoding="utf-8")
+    if "__ADMIN__" not in app:
+        sys.exit("Falta __ADMIN__ en src/app.html.")
+    plain = app.replace("__ADMIN__", json.dumps({"salt": admin_salt, "hash": admin_hash})).encode("utf-8")
+
     salt, iv = os.urandom(16), os.urandom(12)
     key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=ITER).derive(pw.encode("utf-8"))
-    plain = (ROOT / "src" / "app.html").read_bytes()
     ct = AESGCM(key).encrypt(iv, plain, None)
 
     b = lambda x: base64.b64encode(x).decode("ascii")
