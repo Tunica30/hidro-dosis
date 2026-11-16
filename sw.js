@@ -1,4 +1,4 @@
-const VERSION = 'hidro-88cbf7530654';
+const VERSION = 'hidro-923afa63ee5b';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -25,5 +25,14 @@ self.addEventListener('fetch', (e) => {
         return res;
       })
       .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
+  );
+});
+
+// Al tocar un aviso, abre la app (o la trae al frente si ya estaba abierta).
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      .then((list) => (list.length ? list[0].focus() : self.clients.openWindow('./')))
   );
 });
