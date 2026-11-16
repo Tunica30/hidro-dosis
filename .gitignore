@@ -1,3 +1,4 @@
 # La versión sin cifrar nunca se sube
 src/app.html
 __pycache__/
+.build-secrets.json
