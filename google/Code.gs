@@ -3,6 +3,7 @@
 
 // Planilla "Hidro Dosis Usuarios"
 const SS = SpreadsheetApp.openById('1vxmWFBLpxiWxihmsyGTzwQ2NOoUXO5o54gotwPuVGYA');
+const LOG_HEADERS = ['Fecha', 'Tanque', 'Usuario', 'Litros', 'ppm', 'Objetivo', 'Etapa', 'Agua', 'Indicación', 'Estado'];
 
 function sheet_(name, headers) {
   let s = SS.getSheetByName(name);
@@ -58,63 +59,79 @@ function str_(v, max) {
   return String(v == null ? '' : v).slice(0, max || 80);
 }
 
+// Usuarios: se lee solo cuando hace falta
+function users_() {
+  const sh = sheet_('Usuarios', ['ID', 'Nombre', 'Dispositivo', 'Primer ingreso', 'Último ingreso', 'Ingresos']);
+  const data = sh.getDataRange().getValues();
+  const rowOf = (id) => {
+    for (let i = 1; i < data.length; i++) if (data[i][0] === id) return i + 1;
+    return 0;
+  };
+  const nameOf = (id) => {
+    const r = rowOf(String(id || ''));
+    return r ? String(data[r - 1][1]) : 'Sin registrar';
+  };
+  return { sh: sh, data: data, rowOf: rowOf, nameOf: nameOf };
+}
+
 function doGet() {
   return out_({ ok: true, app: 'hidro-dosis' });
 }
 
 function doPost(e) {
+  const b = JSON.parse(e.postData.contents);
+  if (b.action === 'ping') return out_({ ok: true });
+
+  // Lectura rápida, sin bloqueo
+  if (b.action === 'state') {
+    return out_({ ok: true, config: getJSON_('CONFIG', null), last: getJSON_('LAST', {}), me: b.id ? users_().nameOf(b.id) : '' });
+  }
+
+  if (b.action === 'history') {
+    if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
+    const s = SS.getSheetByName('Mediciones');
+    if (!s || s.getLastRow() < 2) return out_({ ok: true, rows: [] });
+    const n = s.getLastRow();
+    const start = Math.max(2, n - 399);
+    const vals = s.getRange(start, 1, n - start + 1, 10).getValues();
+    return out_({
+      ok: true,
+      rows: vals.reverse().map((r) => ({ time: r[0], tank: r[1], user: r[2], liters: r[3], ppm: r[4], target: r[5], stage: r[6], water: r[7], summary: r[8], status: r[9] })),
+    });
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const b = JSON.parse(e.postData.contents);
-    if (b.action === 'ping') return out_({ ok: true });
-
-    const users = sheet_('Usuarios', ['ID', 'Nombre', 'Dispositivo', 'Primer ingreso', 'Último ingreso', 'Ingresos']);
-    const data = users.getDataRange().getValues();
-    const rowOf = (id) => {
-      for (let i = 1; i < data.length; i++) if (data[i][0] === id) return i + 1;
-      return 0;
-    };
-    const userName = (id) => {
-      const r = rowOf(String(id || ''));
-      return r ? String(data[r - 1][1]) : 'Sin registrar';
-    };
-
     if (b.action === 'hit') {
+      const u = users_();
       const id = str_(b.id, 40);
       if (!id) return out_({ ok: false, error: 'id' });
       const dev = str_(b.device, 60);
       const now = new Date();
-      const r = rowOf(id);
+      const r = u.rowOf(id);
       let name;
       if (r) {
-        name = data[r - 1][1];
-        users.getRange(r, 3).setValue(dev);
-        users.getRange(r, 5).setValue(now);
-        users.getRange(r, 6).setValue((Number(data[r - 1][5]) || 0) + 1);
+        name = u.data[r - 1][1];
+        u.sh.getRange(r, 3, 1, 4).setValues([[dev, u.data[r - 1][3], now, (Number(u.data[r - 1][5]) || 0) + 1]]);
       } else {
-        name = 'Dispositivo ' + data.length;
-        users.appendRow([id, name, dev, now, now, 1]);
+        name = 'Dispositivo ' + u.data.length;
+        u.sh.appendRow([id, name, dev, now, now, 1]);
       }
       sheet_('Ingresos', ['Fecha', 'ID', 'Nombre', 'Dispositivo']).appendRow([now, id, name, dev]);
-      return out_({ ok: true });
+      return out_({ ok: true, me: name });
     }
 
-    // Estado de todos los tanques y ajustes compartidos
-    if (b.action === 'state') {
-      return out_({ ok: true, config: getJSON_('CONFIG', null), last: getJSON_('LAST', {}) });
-    }
+    const log = () => sheet_('Mediciones', LOG_HEADERS);
 
-    const log = () => sheet_('Mediciones', ['Fecha', 'Tanque', 'Usuario', 'Litros', 'ppm', 'Objetivo', 'Etapa', 'Llenar', 'Indicación', 'Estado']);
-
-    // Nueva medición de un tanque
+    // Nueva medición de un tanque, o tanque apagado (kind = 'off')
     if (b.action === 'measure') {
       const tank = str_(b.tank, 10);
       if (!tank) return out_({ ok: false, error: 'tank' });
-      const now = new Date();
+      const now = b.time ? new Date(b.time) : new Date();
       const entry = {
         time: now.toISOString(),
-        user: userName(b.id),
+        user: users_().nameOf(b.id),
         liters: num_(b.liters),
         ppm: num_(b.ppm),
         target: num_(b.target),
@@ -127,8 +144,10 @@ function doPost(e) {
       const last = getJSON_('LAST', {});
       last[tank] = entry;
       setJSON_('LAST', last);
-      log().appendRow([now, str_(b.name, 30) || tank, entry.user, entry.liters, entry.ppm, entry.target, entry.stage,
-        entry.fill ? 'Sí' : 'No', entry.summary, entry.kind === 'ok' ? 'En rango' : 'Para corregir']);
+      const estado = entry.kind === 'ok' ? 'En rango' : entry.kind === 'off' ? 'Apagado' : 'Para corregir';
+      log().appendRow([now, str_(b.name, 30) || tank, entry.user,
+        entry.kind === 'off' ? '' : entry.liters, entry.kind === 'off' ? '' : entry.ppm, entry.kind === 'off' ? '' : entry.target,
+        entry.stage, str_(b.water, 30), entry.summary, estado]);
       return out_({ ok: true, last: entry });
     }
 
@@ -137,10 +156,10 @@ function doPost(e) {
       const tank = str_(b.tank, 10);
       const last = getJSON_('LAST', {});
       if (!last[tank]) return out_({ ok: false, error: 'tank' });
-      const now = new Date();
-      last[tank].done = { time: now.toISOString(), user: userName(b.id) };
+      const now = b.time ? new Date(b.time) : new Date();
+      last[tank].done = { time: now.toISOString(), user: users_().nameOf(b.id) };
       setJSON_('LAST', last);
-      log().appendRow([now, str_(b.name, 30) || tank, last[tank].done.user, '', '', '', '', '', 'Marcado como corregido', 'Corregido']);
+      log().appendRow([now, str_(b.name, 30) || tank, last[tank].done.user, '', '', '', '', '', last[tank].summary, 'Corregido']);
       return out_({ ok: true, last: last[tank] });
     }
 
@@ -154,16 +173,18 @@ function doPost(e) {
     }
 
     if (b.action === 'list') {
+      const u = users_();
       return out_({
         ok: true,
-        users: data.slice(1).map((r) => ({ id: r[0], name: r[1], device: r[2], first: r[3], last: r[4], count: r[5] })),
+        users: u.data.slice(1).map((r) => ({ id: r[0], name: r[1], device: r[2], first: r[3], last: r[4], count: r[5] })),
       });
     }
 
     if (b.action === 'rename') {
-      const r = rowOf(String(b.id));
+      const u = users_();
+      const r = u.rowOf(String(b.id));
       if (!r) return out_({ ok: false, error: 'id' });
-      users.getRange(r, 2).setValue(str_(b.name, 40));
+      u.sh.getRange(r, 2).setValue(str_(b.name, 40));
       return out_({ ok: true });
     }
 
