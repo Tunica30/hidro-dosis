@@ -104,7 +104,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay'];
+const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -522,6 +522,15 @@ function doPost(e) {
       ps.appendRow([pid, now, emp, hours, rate || '', rate ? total : '', dayDate_(from), dayDate_(to), hit.length, users_().nameOf(b.id), 'Pagado']);
       ps.getRange(ps.getLastRow(), 7, 1, 2).setNumberFormat('dd/mm/yyyy');
       return out_({ ok: true, hours: hours, total: total });
+    }
+
+    // Borrar pagos de la lista (hoja Pagos). Sus horas siguen como "Pagado": no vuelven a la cuenta.
+    if (b.action === 'paydel') {
+      const ids = (Array.isArray(b.pays) ? b.pays : []).map(String);
+      const ps = SS.getSheetByName('Pagos');
+      const rows = rows_('Pagos', 1);
+      for (let k = rows.length - 1; k >= 0; k--) if (ids.indexOf(String(rows[k][0])) >= 0) ps.deleteRow(k + 2);
+      return out_({ ok: true });
     }
 
     // Deshacer un pago: sus horas vuelven a "Pendiente" y el pago queda "Anulado"
