@@ -104,12 +104,12 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove'];
+const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
 // Hoja "Pagos": una fila por pago (con el total de horas y de plata).
-// Empleados (nombre, valor de la hora, cada cuánto se les paga): en la propiedad EMPLOYEES.
+// Empleados: las personas con acceso a Horas (ver "Personas y accesos" más abajo).
 const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 'Estado', 'Pagado el', 'Pago', 'Dispositivo', 'Cargado por'];
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
 
@@ -135,8 +135,39 @@ function rows_(name, cols) {
   return s.getRange(2, 1, s.getLastRow() - 1, cols).getValues();
 }
 
+// ---------- Personas y accesos ----------
+// PEOPLE: [{ id, name, code, tanks, hours, rate, freq }]. El dueño las crea con un código de 6 números.
+// DEVLINK: { dispositivo: id de la persona, o 'OWNER' }. Un celular sin vínculo no puede ver ni guardar nada.
+// El código sirve una sola vez: al usarlo queda vinculado ese celular y el código se borra.
+function people_() {
+  const p = getJSON_('PEOPLE', null);
+  if (p) return p;
+  // Primera vez: los empleados que ya estaban cargados pasan a ser personas con acceso a Horas
+  return getJSON_('EMPLOYEES', []).map((e) => ({ id: Utilities.getUuid(), name: e.name, code: '', tanks: false, hours: true, rate: num_(e.rate), freq: e.freq || '' }));
+}
+
+function links_() {
+  return getJSON_('DEVLINK', {});
+}
+
+// Quién es este dispositivo y qué puede hacer (null = no está vinculado)
+function who_(devId) {
+  const l = devId ? links_()[String(devId)] : null;
+  if (!l) return null;
+  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true };
+  const p = people_().find((x) => x.id === l);
+  return p ? { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours } : null;
+}
+
+// Empleados para las horas: las personas con acceso a Horas
 function emps_() {
-  return getJSON_('EMPLOYEES', []);
+  return people_().filter((p) => p.hours).map((p) => ({ name: p.name, rate: num_(p.rate), freq: p.freq || '' }));
+}
+
+function setUserName_(devId, name) {
+  const u = users_();
+  const r = u.rowOf(String(devId));
+  if (r) u.sh.getRange(r, 2).setValue(name);
 }
 
 // Horas sin pagar. mine = las cargó este dispositivo (las puede borrar).
@@ -175,9 +206,12 @@ function doPost(e) {
   // Un dispositivo bloqueado no lee ni guarda nada (en las acciones de ajustes, b.id es el dispositivo a modificar)
   if (ADMIN_ACTIONS.indexOf(b.action) < 0 && isBlocked_(b.id)) return out_({ ok: false, error: 'blocked' });
 
-  // Lectura rápida, sin bloqueo
+  const me = ADMIN_ACTIONS.indexOf(b.action) < 0 ? who_(b.id) : null;
+  const noAccess = () => out_({ ok: false, error: 'noaccess', who: me });
+
+  // Lectura rápida, sin bloqueo. Sin vínculo o sin permiso de tanques, no se mandan los tanques.
   if (b.action === 'state') {
-    return out_({ ok: true, config: getJSON_('CONFIG', null), last: getJSON_('LAST', {}), me: b.id ? users_().nameOf(b.id) : '' });
+    return out_({ ok: true, who: me, config: getJSON_('CONFIG', null), last: me && me.tanks ? getJSON_('LAST', {}) : {}, me: me ? me.name : '' });
   }
 
   if (b.action === 'history') {
@@ -195,6 +229,7 @@ function doPost(e) {
 
   // Registro de un día (para todos): movimientos entre from y to
   if (b.action === 'day') {
+    if (!me || !me.tanks) return noAccess();
     const s = SS.getSheetByName('Mediciones');
     if (!s || s.getLastRow() < 2) return out_({ ok: true, rows: [] });
     const from = new Date(b.from), to = new Date(b.to);
@@ -209,12 +244,18 @@ function doPost(e) {
   }
 
   // Horas sin pagar y lista de empleados (sin el valor de la hora, que lo ve solo el dueño)
+  // Cada persona ve solo lo suyo; el dueño ve a todos
   if (b.action === 'hours') {
+    if (!me || !me.hours) return noAccess();
+    const last = lastPaid_(payments_());
+    const mine = (n) => me.owner || n === me.name;
+    const myLast = {};
+    if (last[me.name]) myLast[me.name] = last[me.name];
     return out_({
       ok: true,
-      emps: emps_().map((e) => e.name),
-      pending: pendingHours_(rows_('Horas', HOURS_HEADERS.length), b.id),
-      last: lastPaid_(payments_()),
+      emps: me.owner ? emps_().map((e) => e.name) : [me.name],
+      pending: pendingHours_(rows_('Horas', HOURS_HEADERS.length), b.id).filter((x) => mine(x.emp)),
+      last: me.owner ? last : myLast,
     });
   }
 
@@ -222,9 +263,40 @@ function doPost(e) {
   lock.waitLock(10000);
   try {
     // Cargar horas. El ID lo arma el celular: si llega dos veces (reintento), se guarda una sola.
+    // Vincular este celular con el código que le dio el dueño
+    if (b.action === 'link') {
+      const cache = CacheService.getScriptCache();
+      const fails = Number(cache.get('linkfails') || 0);
+      if (fails >= 10) return out_({ ok: false, error: 'wait' });
+      const code = String(b.code || '').replace(/\D/g, '');
+      const people = people_();
+      const p = code.length === 6 ? people.find((x) => x.code === code) : null;
+      if (!p) { cache.put('linkfails', String(fails + 1), 600); return out_({ ok: false, error: 'code' }); }
+      const links = links_();
+      links[String(b.id)] = p.id;
+      p.code = '';
+      setJSON_('DEVLINK', links);
+      setJSON_('PEOPLE', people);
+      setUserName_(b.id, p.name);
+      return out_({ ok: true, who: who_(b.id) });
+    }
+
+    // El dueño entra con la contraseña de ajustes: este celular queda como del dueño
+    if (b.action === 'owner') {
+      if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
+      const links = links_();
+      links[String(b.id)] = 'OWNER';
+      setJSON_('DEVLINK', links);
+      setUserName_(b.id, 'Dueño');
+      return out_({ ok: true, who: who_(b.id) });
+    }
+
+    if (['hoursadd', 'hoursdel'].indexOf(b.action) >= 0 && (!me || !me.hours)) return noAccess();
+    if (['measure', 'done', 'undo'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
+
     if (b.action === 'hoursadd') {
       const e = b.entry || {};
-      const id = str_(e.id, 40), emp = str_(e.emp, 40).trim(), job = str_(e.job, 60).trim(), hours = num_(e.hours);
+      const id = str_(e.id, 40), emp = me.owner ? str_(e.emp, 40).trim() : me.name, job = str_(e.job, 60).trim(), hours = num_(e.hours);
       const day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.day)) ? String(e.day) : '';
       if (!id || !emp || !day || !(hours > 0 && hours <= 24)) return out_({ ok: false, error: 'hours' });
       const sh = sheet_('Horas', HOURS_HEADERS);
@@ -373,19 +445,54 @@ function doPost(e) {
       });
     }
 
-    // Empleados: [{ name, rate, freq }]
-    if (b.action === 'emps') {
-      if (!Array.isArray(b.emps)) return out_({ ok: false, error: 'emps' });
-      const seen = {};
-      const list = [];
-      b.emps.forEach((e) => {
-        const name = str_(e && e.name, 40).trim();
-        if (!name || seen[name.toLowerCase()]) return;
-        seen[name.toLowerCase()] = true;
-        list.push({ name: name, rate: num_(e.rate), freq: e.freq === 'quincenal' ? 'quincenal' : e.freq === 'semanal' ? 'semanal' : '' });
+    // Personas: lista con sus celulares vinculados
+    if (b.action === 'people') {
+      const u = users_();
+      const links = links_();
+      const devs = (pid) => Object.keys(links).filter((d) => links[d] === pid).map((d) => {
+        const r = u.rowOf(d);
+        return { id: d, device: r ? String(u.data[r - 1][2]) : '', last: r ? iso_(u.data[r - 1][4]) : '' };
       });
-      setJSON_('EMPLOYEES', list);
-      return out_({ ok: true, emps: list });
+      return out_({ ok: true, people: people_().map((p) => Object.assign({}, p, { devices: devs(p.id) })), owners: devs('OWNER') });
+    }
+
+    // Guardar personas. Si a alguien le cambian el nombre, sus horas sin pagar pasan al nombre nuevo.
+    if (b.action === 'setpeople') {
+      if (!Array.isArray(b.people)) return out_({ ok: false, error: 'people' });
+      const old = people_();
+      const seen = {}, codes = {};
+      const list = [];
+      b.people.forEach((x) => {
+        const name = str_(x && x.name, 40).trim();
+        if (!name || seen[name.toLowerCase()]) return;
+        let code = String(x.code || '').replace(/\D/g, '').slice(0, 6);
+        if (code.length !== 6 || codes[code]) code = '';
+        seen[name.toLowerCase()] = true;
+        if (code) codes[code] = true;
+        list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours,
+          rate: num_(x.rate), freq: x.freq === 'quincenal' ? 'quincenal' : x.freq === 'semanal' ? 'semanal' : '' });
+      });
+      const renames = {};
+      old.forEach((o) => { const n = list.find((p) => p.id === o.id); if (n && n.name !== o.name) renames[o.name] = n.name; });
+      const vals = rows_('Horas', HOURS_HEADERS.length);
+      if (Object.keys(renames).length && vals.length) {
+        vals.forEach((r) => { if (r[6] === 'Pendiente' && renames[r[3]]) r[3] = renames[r[3]]; });
+        SS.getSheetByName('Horas').getRange(2, 4, vals.length, 1).setValues(vals.map((r) => [r[3]]));
+      }
+      // Personas borradas: sus celulares quedan sin vínculo
+      const links = links_();
+      Object.keys(links).forEach((d) => { if (links[d] !== 'OWNER' && !list.some((p) => p.id === links[d])) delete links[d]; });
+      setJSON_('DEVLINK', links);
+      setJSON_('PEOPLE', list);
+      return out_({ ok: true });
+    }
+
+    // Desvincular un celular (tiene que volver a poner un código)
+    if (b.action === 'unlink') {
+      const links = links_();
+      delete links[String(b.dev)];
+      setJSON_('DEVLINK', links);
+      return out_({ ok: true });
     }
 
     // Pagar: las cargas que el dueño vio (ids) pasan a "Pagado" y se anota el pago
