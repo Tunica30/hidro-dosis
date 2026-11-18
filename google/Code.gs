@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel'];
+const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -181,7 +181,7 @@ function pendingHours_(vals, devId) {
 }
 
 function payments_() {
-  return rows_('Pagos', PAY_HEADERS.length).map((r) => ({
+  return rows_('Pagos', PAY_HEADERS.length).filter((r) => r[0] && !/oculto/i.test(r[10])).map((r) => ({
     id: String(r[0]), date: iso_(r[1]), emp: String(r[2]), hours: num_(r[3]), rate: num_(r[4]), total: num_(r[5]),
     from: ymd_(r[6]), to: ymd_(r[7]), count: num_(r[8]), by: String(r[9]), status: String(r[10]),
   }));
@@ -217,10 +217,54 @@ function hoursAdmin_(devId) {
     ok: true,
     emps: emps_(),
     pending: pendingHours_(vals, devId),
-    payments: pays.filter((p) => !/oculto/i.test(p.status)).slice(-40).reverse(),
+    payments: pays.slice(-40).reverse(),
     last: lastPaid_(pays),
     months: months_(vals, pays),
   };
+}
+
+// Todas las cargas de una persona (pagadas o no), para que el dueño las corrija
+function empEntries_(emp) {
+  return rows_('Horas', HOURS_HEADERS.length).filter((r) => String(r[3]) === String(emp)).map((r) => ({
+    id: String(r[0]), at: iso_(r[1]), day: ymd_(r[2]), emp: String(r[3]), hours: num_(r[4]), job: String(r[5]),
+    status: String(r[6]), paidAt: iso_(r[7]), pay: String(r[8]), by: String(r[10]),
+  }));
+}
+
+// Respuesta para el dueño después de un cambio: todo actualizado y, si se pidió, las cargas de esa persona
+function adminReply_(b) {
+  const r = hoursAdmin_(b.id);
+  if (b.emp) r.entries = empEntries_(b.emp);
+  return r;
+}
+
+// Recalcula un pago a partir de sus horas (después de corregir o borrar horas ya pagadas).
+// Si ya no le queda ninguna hora, el pago se borra.
+function fixPay_(pid) {
+  if (!pid) return;
+  const ps = ss_().getSheetByName('Pagos');
+  if (!ps) return;
+  const pays = rows_('Pagos', PAY_HEADERS.length);
+  const k = pays.findIndex((r) => String(r[0]) === String(pid));
+  if (k < 0) return;
+  const hrs = rows_('Horas', HOURS_HEADERS.length).filter((r) => String(r[8]) === String(pid) && r[6] === 'Pagado');
+  if (!hrs.length) { ps.deleteRow(k + 2); return; }
+  let h = 0, from = '', to = '';
+  hrs.forEach((r) => { h += num_(r[4]); const d = ymd_(r[2]); if (!from || d < from) from = d; if (!to || d > to) to = d; });
+  const rate = num_(pays[k][4]);
+  ps.getRange(k + 2, 4, 1, 6).setValues([[h, rate || '', rate ? Math.round(h * rate) : '', dayDate_(from), dayDate_(to), hrs.length]]);
+}
+
+// Borra de una hoja las filas que cumplen test (reescribe la hoja de una vez: es mucho más rápido que borrar fila por fila)
+function dropRows_(name, cols, test) {
+  const sh = ss_().getSheetByName(name);
+  if (!sh || sh.getLastRow() < 2) return 0;
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, cols).getValues();
+  const keep = vals.filter((r) => !test(r));
+  if (keep.length === vals.length) return 0;
+  sh.getRange(2, 1, vals.length, cols).clearContent();
+  if (keep.length) sh.getRange(2, 1, keep.length, cols).setValues(keep);
+  return vals.length - keep.length;
 }
 
 // Personas con sus celulares vinculados
@@ -359,11 +403,13 @@ function doPost(e) {
     if (b.action === 'hoursdel') {
       const vals = rows_('Horas', HOURS_HEADERS.length);
       const i = vals.findIndex((r) => String(r[0]) === String(b.entry));
-      if (i < 0) return out_({ ok: true });
-      if (vals[i][6] !== 'Pendiente') return out_({ ok: false, error: 'paid' });
-      if (String(vals[i][9]) !== String(b.id) && !checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
+      const owner = !!b.pin && checkPin_(b.pin);
+      if (i < 0) return out_(owner ? adminReply_(b) : { ok: true });
+      if (!owner && vals[i][6] !== 'Pendiente') return out_({ ok: false, error: 'paid' });
+      if (!owner && String(vals[i][9]) !== String(b.id)) return out_({ ok: false, error: 'pin' });
       ss_().getSheetByName('Horas').deleteRow(i + 2);
-      return out_(b.pin && checkPin_(b.pin) ? hoursAdmin_(b.id) : { ok: true });
+      if (vals[i][6] === 'Pagado') fixPay_(vals[i][8]);
+      return out_(owner ? adminReply_(b) : { ok: true });
     }
 
     if (b.action === 'hit') {
@@ -511,7 +557,13 @@ function doPost(e) {
         vals.forEach((r) => { if (r[6] === 'Pendiente' && renames[r[3]]) r[3] = renames[r[3]]; });
         ss_().getSheetByName('Horas').getRange(2, 4, vals.length, 1).setValues(vals.map((r) => [r[3]]));
       }
-      // Personas borradas: sus celulares quedan sin vínculo
+      // Personas quitadas: se borran todas sus horas y sus pagos
+      old.forEach((o) => {
+        if (list.some((p) => p.id === o.id || p.name === o.name)) return;
+        dropRows_('Horas', HOURS_HEADERS.length, (r) => String(r[3]) === o.name);
+        dropRows_('Pagos', PAY_HEADERS.length, (r) => String(r[2]) === o.name);
+      });
+      // Personas quitadas: sus celulares quedan sin vínculo
       const links = links_();
       Object.keys(links).forEach((d) => { if (links[d] !== 'OWNER' && !list.some((p) => p.id === links[d])) delete links[d]; });
       setJSON_('DEVLINK', links);
@@ -555,25 +607,41 @@ function doPost(e) {
       const ps = sheet_('Pagos', PAY_HEADERS);
       ps.appendRow([pid, now, emp, hours, rate || '', rate ? total : '', dayDate_(from), dayDate_(to), hit.length, users_().nameOf(b.id), 'Pagado']);
       ps.getRange(ps.getLastRow(), 7, 1, 2).setNumberFormat('dd/mm/yyyy');
-      return out_(Object.assign(hoursAdmin_(b.id), { paid: { hours: hours, total: total } }));
+      return out_(Object.assign(adminReply_(b), { paid: { hours: hours, total: total } }));
     }
 
-    // Sacar pagos de la lista: quedan en la hoja Pagos como "Oculto" y siguen contando en el resumen mensual.
-    // Sus horas siguen como "Pagado": no vuelven a la cuenta.
+    // Borrar pagos: desaparecen de la lista, del resumen mensual y de la hoja Pagos. Sus horas siguen como pagadas.
     if (b.action === 'paydel') {
       const ids = (Array.isArray(b.pays) ? b.pays : []).map(String);
-      const ps = ss_().getSheetByName('Pagos');
-      const rows = rows_('Pagos', PAY_HEADERS.length);
-      const hit = [];
-      // Un pago deshecho queda "Anulado oculto" (no cuenta en el resumen); uno vigente, "Oculto" (sí cuenta)
-      const hide = [], hideVoid = [];
-      rows.forEach((r, k) => {
-        if (ids.indexOf(String(r[0])) < 0 || /oculto/i.test(r[10])) return;
-        (r[10] === 'Anulado' ? hideVoid : hide).push('K' + (k + 2));
-      });
-      if (hide.length) ps.getRangeList(hide).setValue('Oculto');
-      if (hideVoid.length) ps.getRangeList(hideVoid).setValue('Anulado oculto');
+      dropRows_('Pagos', PAY_HEADERS.length, (r) => ids.indexOf(String(r[0])) >= 0);
+      return out_(adminReply_(b));
+    }
+
+    // Borrar todas las horas y pagos de alguien que ya no está en Personas (datos que quedaron sueltos)
+    if (b.action === 'empwipe') {
+      const emp = str_(b.emp, 40);
+      if (!emp || people_().some((p) => p.name === emp)) return out_({ ok: false, error: 'person' });
+      dropRows_('Horas', HOURS_HEADERS.length, (r) => String(r[3]) === emp);
+      dropRows_('Pagos', PAY_HEADERS.length, (r) => String(r[2]) === emp);
       return out_(hoursAdmin_(b.id));
+    }
+
+    // Lista de todas las cargas de una persona
+    if (b.action === 'empentries') return out_({ ok: true, entries: empEntries_(str_(b.emp, 40)) });
+
+    // Corregir una carga (día, horas, trabajo). Si ya estaba pagada, se recalcula ese pago.
+    if (b.action === 'hoursedit') {
+      const vals = rows_('Horas', HOURS_HEADERS.length);
+      const i = vals.findIndex((r) => String(r[0]) === String(b.entry));
+      if (i < 0) return out_({ ok: false, error: 'gone' });
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(String(b.day)) ? String(b.day) : '';
+      const hours = num_(b.hours), job = str_(b.job, 60).trim();
+      if (!day || !(hours > 0 && hours <= 24) || !job) return out_({ ok: false, error: 'hours' });
+      const sh = ss_().getSheetByName('Horas');
+      sh.getRange(i + 2, 3).setValue(dayDate_(day));
+      sh.getRange(i + 2, 5, 1, 2).setValues([[hours, job]]);
+      if (vals[i][6] === 'Pagado') fixPay_(vals[i][8]);
+      return out_(adminReply_(b));
     }
 
     // Deshacer un pago: sus horas vuelven a "Pendiente" y el pago queda "Anulado"
@@ -591,7 +659,7 @@ function doPost(e) {
         sh.getRangeList(hit.map((n) => 'H' + n + ':I' + n)).setValue('');
       }
       ps.getRange(k + 2, PAY_HEADERS.length).setValue('Anulado');
-      return out_(hoursAdmin_(b.id));
+      return out_(adminReply_(b));
     }
 
     if (b.action === 'rename') {
