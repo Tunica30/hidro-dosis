@@ -332,7 +332,7 @@ function doPost(e) {
     return out_({
       ok: true,
       rows: vals.filter((r) => r[0] instanceof Date && r[0] >= from && r[0] < to)
-        .map((r) => ({ time: r[0], tank: r[1], user: r[2], summary: r[8], status: r[9], note: r[11] })),
+        .map((r) => ({ time: r[0], tank: r[1], user: r[2], liters: r[3], ppm: r[4], target: r[5], water: r[7], summary: r[8], status: r[9], note: r[11] })),
     });
   }
 
