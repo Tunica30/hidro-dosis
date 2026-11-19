@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -140,6 +140,58 @@ function writeAll_(name, headers, rows) {
   const n = sh.getLastRow();
   if (n > 1) sh.getRange(2, 1, n - 1, headers.length).clearContent();
   if (rows.length) sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+}
+
+// ---------- Stock de insumos (solo el dueño) ----------
+// Hoja "Stock": un movimiento por fila. Tipos: Conteo (deja el stock en esa cantidad), Compra (+),
+// Preparación (− químicos sólidos y + litros de Tanque A/B/C), Ajuste (+ o −).
+// Lo que se usa de los tanques A, B y C sale solo de las correcciones confirmadas en "Mediciones".
+const STOCK_HEADERS = ['ID', 'Fecha', 'Insumo', 'Cantidad', 'Unidad', 'Tipo', 'Detalle', 'Proveedor', 'Precio por unidad', 'Total', 'Cargado el'];
+const STOCK_TYPES = ['Conteo', 'Compra', 'Preparación', 'Ajuste'];
+const STOCK_UNITS = ['kg', 'L', 'unidad'];
+
+// "4,77" o "1.234,5" -> número; ml -> L
+function amt_(v, u) {
+  const n = parseFloat(String(v).replace(/\./g, '').replace(',', '.'));
+  return isFinite(n) ? (u === 'ml' ? n / 1000 : n) : 0;
+}
+
+// Litros de A, B y C de cada corrección confirmada desde "since" (las deshechas no cuentan)
+function tankUse_(since) {
+  const s = ss_().getSheetByName('Mediciones');
+  if (!s || s.getLastRow() < 2 || !since) return [];
+  const n = s.getLastRow(), start = Math.max(2, n - 19999);
+  const vals = s.getRange(start, 1, n - start + 1, 10).getValues();
+  const open = {}, out = [];
+  vals.forEach((r) => {
+    if (!(r[0] instanceof Date) || r[0] < since) return;
+    const tank = String(r[1]), st = String(r[9]), sum = String(r[8] || '');
+    if (st === 'Corregido') {
+      const e = { time: r[0].toISOString(), tank: tank, A: 0, B: 0, C: 0 };
+      ['A', 'B', 'C'].forEach((k) => {
+        const m = sum.match(new RegExp('\\b' + k + ' ([\\d.,]+) (L|ml)'));
+        if (m) e[k] = amt_(m[1], m[2]);
+      });
+      out.push(e);
+      (open[tank] = open[tank] || []).push(e);
+    } else if (st === 'Anulado' && /correcci/i.test(sum) && open[tank] && open[tank].length) {
+      const e = open[tank].pop();
+      e.A = e.B = e.C = 0;
+    }
+  });
+  return out.filter((e) => e.A || e.B || e.C);
+}
+
+function stockData_() {
+  const rows = rows_('Stock', STOCK_HEADERS.length);
+  const ledger = rows.map((r) => ({
+    id: String(r[0]), day: ymd_(r[1]), item: String(r[2] || ''), qty: num_(r[3]), unit: String(r[4] || ''), type: String(r[5] || ''),
+    detail: String(r[6] || ''), sup: String(r[7] || ''), price: num_(r[8]), total: num_(r[9]), at: iso_(r[10]),
+  }));
+  let since = null;
+  rows.forEach((r) => { if (/^Tanque [ABC]$/.test(String(r[2])) && r[1] instanceof Date && (!since || r[1] < since)) since = r[1]; });
+  if (since) { since = new Date(since); since.setHours(0, 0, 0, 0); }
+  return { ok: true, ledger: ledger, use: tankUse_(since) };
 }
 
 // ---------- Fumigaciones ----------
@@ -541,6 +593,42 @@ function doPost(e) {
     if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
 
     if (b.action === 'sup') return out_(supData_());
+
+    if (b.action === 'stock') return out_(stockData_());
+
+    // Agregar movimientos de stock. Una compra también deja el precio en "Precios" (mismo ID), así no se carga dos veces.
+    // El ID lo arma el celular: si llega dos veces, se guarda una sola.
+    if (b.action === 'stockadd') {
+      const have = {};
+      rows_('Stock', 1).forEach((r) => { have[String(r[0])] = 1; });
+      const prods = {};
+      rows_('Productos de proveedores', SPROD_HEADERS.length).forEach((r) => { prods[String(r[0])] = { id: String(r[0]), sup: String(r[2] || ''), name: String(r[3] || '') }; });
+      const now = new Date(), rows = [], prices = [];
+      (Array.isArray(b.moves) ? b.moves : []).slice(0, 60).forEach((m) => {
+        const id = str_(m.id, 60), day = /^\d{4}-\d{2}-\d{2}$/.test(String(m.day)) ? String(m.day) : '';
+        const item = str_(m.item, 60).trim(), type = STOCK_TYPES.indexOf(String(m.type)) >= 0 ? String(m.type) : '';
+        const unit = STOCK_UNITS.indexOf(String(m.unit)) >= 0 ? String(m.unit) : '';
+        if (!id || have[id] || !day || !item || !type || !unit || !isFinite(Number(m.qty))) return;
+        const p = m.product ? prods[String(m.product)] : null;
+        rows.push([id, dayDate_(day), item, num_(m.qty), unit, type, str_(m.detail, 120), p ? p.sup : '', num_(m.price) || '', num_(m.total) || '', now]);
+        if (type === 'Compra' && p && num_(m.price) > 0) prices.push([id, p.id, p.name, p.sup, dayDate_(day), num_(m.price)]);
+        have[id] = 1;
+      });
+      if (rows.length) { const sh = sheet_('Stock', STOCK_HEADERS); sh.getRange(sh.getLastRow() + 1, 1, rows.length, STOCK_HEADERS.length).setValues(rows); }
+      if (prices.length) { const sh = sheet_('Precios', PRICE_HEADERS); sh.getRange(sh.getLastRow() + 1, 1, prices.length, PRICE_HEADERS.length).setValues(prices); }
+      return out_(stockData_());
+    }
+
+    // Borrar movimientos cargados por error (todos los de una misma carga comparten el comienzo del ID)
+    if (b.action === 'stockdel') {
+      const g = str_(b.group, 60);
+      if (g) {
+        const test = (r) => String(r[0]) === g || String(r[0]).indexOf(g + '~') === 0;
+        dropRows_('Stock', STOCK_HEADERS.length, test);
+        dropRows_('Precios', PRICE_HEADERS.length, test);
+      }
+      return out_(stockData_());
+    }
 
     // Guardar proveedores y productos (enteros), agregar o borrar precios, y la receta de costos
     if (b.action === 'supset') {
