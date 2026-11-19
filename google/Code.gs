@@ -245,9 +245,9 @@ function links_() {
 function who_(devId) {
   const l = devId ? links_()[String(devId)] : null;
   if (!l) return null;
-  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true };
+  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true, fum: true };
   const p = people_().find((x) => x.id === l);
-  return p ? { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours } : null;
+  return p ? { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: p.fum === undefined ? !!p.tanks : !!p.fum } : null;
 }
 
 // Empleados para las horas: las personas con acceso a Horas
@@ -414,9 +414,9 @@ function doPost(e) {
   }
 
   // Registro de un día (para todos): movimientos entre from y to
-  // Fumigaciones: las ve todo el que tiene acceso a tanques (para saber cuándo se puede cosechar)
+  // Fumigaciones: las ve quien tiene permiso de Fumigaciones (para saber cuándo se puede cosechar)
   if (b.action === 'fum') {
-    if (!me || !me.tanks) return noAccess();
+    if (!me || !me.fum) return noAccess();
     return out_({ ok: true, fum: fumRows_() });
   }
 
@@ -744,7 +744,7 @@ function doPost(e) {
         if (code.length !== 6 || codes[code]) code = '';
         seen[name.toLowerCase()] = true;
         if (code) codes[code] = true;
-        list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours,
+        list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours, fum: x.fum === undefined ? !!x.tanks : !!x.fum,
           rate: num_(x.rate), freq: x.freq === 'quincenal' ? 'quincenal' : x.freq === 'semanal' ? 'semanal' : '' });
       });
       const renames = {};
