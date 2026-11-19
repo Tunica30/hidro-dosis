@@ -312,10 +312,14 @@ function doPost(e) {
     const s = ss_().getSheetByName('Mediciones');
     if (!s || s.getLastRow() < 2) return out_({ ok: true, rows: [] });
     const n = s.getLastRow();
-    const start = Math.max(2, n - 399);
-    const vals = s.getRange(start, 1, n - start + 1, COLS).getValues();
+    // Con "tank": todo lo de ese tanque (hasta 3000 movimientos), para ver producciones enteras
+    const one = b.tank ? str_(b.tank, 30) : '';
+    const start = Math.max(2, n - (one ? 19999 : 399));
+    let vals = s.getRange(start, 1, n - start + 1, COLS).getValues();
+    if (one) vals = vals.filter((r) => r[1] === one).slice(-3000);
     return out_({
       ok: true,
+      tank: one,
       rows: vals.reverse().map((r) => ({ time: r[0], tank: r[1], user: r[2], liters: r[3], ppm: r[4], target: r[5], stage: r[6], water: r[7], summary: r[8], status: r[9], ph: r[10], note: r[11] })),
     });
   }
