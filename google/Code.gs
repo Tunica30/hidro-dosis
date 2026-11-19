@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -114,6 +114,43 @@ const ADMIN_ACTIONS = ['history', 'setconfig', 'list', 'rename', 'block', 'remov
 // Empleados: las personas con acceso a Horas (ver "Personas y accesos" más abajo).
 const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 'Estado', 'Pagado el', 'Pago', 'Dispositivo', 'Cargado por'];
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
+const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo', 'Para qué', 'Dosis', 'Carencia (días)', 'Se puede cosechar desde', 'Cargado por', 'Cargado el'];
+
+// ---------- Proveedores, productos y precios (solo el dueño) ----------
+// Proveedores y productos se reescriben enteros en cada guardado (son pocos).
+// Los precios se agregan: cada fila es el precio que se pagó un día, así queda el historial de aumentos.
+// La receta de costos (con qué se prepara cada tanque A, B y C) va en una propiedad.
+const SUP_HEADERS = ['ID', 'Proveedor', 'Teléfono', 'Notas'];
+const SPROD_HEADERS = ['ID', 'Proveedor ID', 'Proveedor', 'Producto', 'Cantidad', 'Unidad'];
+const PRICE_HEADERS = ['ID', 'Producto ID', 'Producto', 'Proveedor', 'Fecha', 'Precio'];
+const PROD_UNITS = ['L', 'ml', 'kg', 'g', 'unidad'];
+
+function supData_() {
+  return {
+    ok: true,
+    suppliers: rows_('Proveedores', SUP_HEADERS.length).map((r) => ({ id: String(r[0]), name: String(r[1] || ''), phone: String(r[2] || ''), notes: String(r[3] || '') })),
+    products: rows_('Productos de proveedores', SPROD_HEADERS.length).map((r) => ({ id: String(r[0]), sup: String(r[1] || ''), name: String(r[3] || ''), size: num_(r[4]), unit: String(r[5] || '') })),
+    prices: rows_('Precios', PRICE_HEADERS.length).slice(-5000).map((r) => ({ id: String(r[0]), product: String(r[1] || ''), day: ymd_(r[4]), price: num_(r[5]) })),
+    recipe: getJSON_('COSTRECIPE', null),
+  };
+}
+
+function writeAll_(name, headers, rows) {
+  const sh = sheet_(name, headers);
+  const n = sh.getLastRow();
+  if (n > 1) sh.getRange(2, 1, n - 1, headers.length).clearContent();
+  if (rows.length) sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+}
+
+// ---------- Fumigaciones ----------
+// Una fila por producto. Los productos aplicados juntos comparten la columna "Fumigación".
+// "Tanques" va con los nombres separados por coma.
+function fumRows_() {
+  return rows_('Fumigaciones', FUM_HEADERS.length).slice(-600).map((r) => ({
+    id: String(r[0]), group: String(r[1]), day: ymd_(r[2]), tanks: String(r[3] || ''), product: String(r[4] || ''), type: String(r[5] || ''),
+    purpose: String(r[6] || ''), dose: String(r[7] || ''), wait: num_(r[8]), ready: ymd_(r[9]), by: String(r[10] || ''),
+  }));
+}
 
 function ymd_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, ss_().getSpreadsheetTimeZone(), 'yyyy-MM-dd');
@@ -325,6 +362,12 @@ function doPost(e) {
   }
 
   // Registro de un día (para todos): movimientos entre from y to
+  // Fumigaciones: las ve todo el que tiene acceso a tanques (para saber cuándo se puede cosechar)
+  if (b.action === 'fum') {
+    if (!me || !me.tanks) return noAccess();
+    return out_({ ok: true, fum: fumRows_() });
+  }
+
   if (b.action === 'day') {
     if (!me || !me.tanks) return noAccess();
     const s = ss_().getSheetByName('Mediciones');
@@ -496,6 +539,68 @@ function doPost(e) {
 
     // Desde acá, solo con la contraseña de ajustes
     if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
+
+    if (b.action === 'sup') return out_(supData_());
+
+    // Guardar proveedores y productos (enteros), agregar o borrar precios, y la receta de costos
+    if (b.action === 'supset') {
+      const sups = (Array.isArray(b.suppliers) ? b.suppliers : []).slice(0, 200)
+        .map((s) => ({ id: str_(s.id, 40), name: str_(s.name, 60).trim(), phone: str_(s.phone, 40), notes: str_(s.notes, 200) }))
+        .filter((s) => s.id && s.name);
+      const supName = {};
+      sups.forEach((s) => { supName[s.id] = s.name; });
+      const prods = (Array.isArray(b.products) ? b.products : []).slice(0, 500)
+        .map((p) => ({ id: str_(p.id, 40), sup: str_(p.sup, 40), name: str_(p.name, 60).trim(), size: num_(p.size), unit: PROD_UNITS.indexOf(String(p.unit)) >= 0 ? String(p.unit) : 'unidad' }))
+        .filter((p) => p.id && p.name && supName[p.sup]);
+      const prodById = {};
+      prods.forEach((p) => { prodById[p.id] = p; });
+      writeAll_('Proveedores', SUP_HEADERS, sups.map((s) => [s.id, s.name, s.phone, s.notes]));
+      writeAll_('Productos de proveedores', SPROD_HEADERS, prods.map((p) => [p.id, p.sup, supName[p.sup], p.name, p.size, p.unit]));
+      const del = (Array.isArray(b.delPrices) ? b.delPrices : []).map(String);
+      if (del.length) dropRows_('Precios', PRICE_HEADERS.length, (r) => del.indexOf(String(r[0])) >= 0);
+      const add = (Array.isArray(b.addPrices) ? b.addPrices : []).filter((x) => x && prodById[String(x.product)] && /^\d{4}-\d{2}-\d{2}$/.test(String(x.day)) && num_(x.price) > 0);
+      if (add.length) {
+        const have = {};
+        rows_('Precios', 1).forEach((r) => { have[String(r[0])] = 1; });
+        const rows = add.filter((x) => !have[str_(x.id, 40)]).map((x) => {
+          const p = prodById[String(x.product)];
+          return [str_(x.id, 40), p.id, p.name, supName[p.sup], dayDate_(String(x.day)), num_(x.price)];
+        });
+        if (rows.length) {
+          const sh = sheet_('Precios', PRICE_HEADERS);
+          sh.getRange(sh.getLastRow() + 1, 1, rows.length, PRICE_HEADERS.length).setValues(rows);
+        }
+      }
+      if (b.recipe && typeof b.recipe === 'object') setJSON_('COSTRECIPE', b.recipe);
+      return out_(supData_());
+    }
+
+    // Cargar una fumigación con uno o más productos. El ID lo arma el celular: si llega dos veces, se guarda una sola.
+    if (b.action === 'fumadd') {
+      const e = b.entry || {};
+      const group = str_(e.id, 40), day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.day)) ? String(e.day) : '';
+      const tanks = (Array.isArray(e.tanks) ? e.tanks : []).map((t) => TANK_NAMES[String(t)]).filter(Boolean);
+      const prods = (Array.isArray(e.products) ? e.products : []).slice(0, 10).map((p) => ({
+        product: str_(p.product, 60).trim(), type: str_(p.type, 20), purpose: str_(p.purpose, 80), dose: str_(p.dose, 60), wait: Math.round(num_(p.wait)),
+      }));
+      if (!group || !day || !tanks.length || !prods.length || prods.some((p) => !p.product || p.wait < 0 || p.wait > 365)) return out_({ ok: false, error: 'fum' });
+      const sh = sheet_('Fumigaciones', FUM_HEADERS);
+      if (!rows_('Fumigaciones', 2).some((r) => String(r[1]) === group)) {
+        const now = new Date();
+        sh.getRange(sh.getLastRow() + 1, 1, prods.length, FUM_HEADERS.length).setValues(prods.map((p, i) => {
+          const ready = dayDate_(day);
+          ready.setDate(ready.getDate() + p.wait);
+          return [group + '-' + (i + 1), group, dayDate_(day), tanks.join(', '), p.product, p.type, p.purpose, p.dose, p.wait, ready, 'Dueño', now];
+        }));
+      }
+      return out_({ ok: true, fum: fumRows_() });
+    }
+
+    // Borrar una fumigación cargada por error (todos sus productos)
+    if (b.action === 'fumdel') {
+      dropRows_('Fumigaciones', FUM_HEADERS.length, (r) => String(r[1]) === String(b.entry));
+      return out_({ ok: true, fum: fumRows_() });
+    }
 
     if (b.action === 'setconfig') {
       if (!b.config || typeof b.config !== 'object') return out_({ ok: false, error: 'config' });
