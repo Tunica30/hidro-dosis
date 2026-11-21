@@ -121,7 +121,7 @@ const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo'
 // Los precios se agregan: cada fila es el precio que se pagó un día, así queda el historial de aumentos.
 // La receta de costos (con qué se prepara cada tanque A, B y C) va en una propiedad.
 const SUP_HEADERS = ['ID', 'Proveedor', 'Teléfono', 'Notas'];
-const SPROD_HEADERS = ['ID', 'Proveedor ID', 'Proveedor', 'Producto', 'Cantidad', 'Unidad'];
+const SPROD_HEADERS = ['ID', 'Proveedor ID', 'Proveedor', 'Producto', 'Cantidad', 'Unidad', 'Marca'];
 const PRICE_HEADERS = ['ID', 'Producto ID', 'Producto', 'Proveedor', 'Fecha', 'Precio'];
 const PROD_UNITS = ['L', 'ml', 'kg', 'g', 'unidad'];
 
@@ -129,7 +129,7 @@ function supData_() {
   return {
     ok: true,
     suppliers: rows_('Proveedores', SUP_HEADERS.length).map((r) => ({ id: String(r[0]), name: String(r[1] || ''), phone: String(r[2] || ''), notes: String(r[3] || '') })),
-    products: rows_('Productos de proveedores', SPROD_HEADERS.length).map((r) => ({ id: String(r[0]), sup: String(r[1] || ''), name: String(r[3] || ''), size: num_(r[4]), unit: String(r[5] || '') })),
+    products: rows_('Productos de proveedores', SPROD_HEADERS.length).map((r) => ({ id: String(r[0]), sup: String(r[1] || ''), name: String(r[3] || ''), size: num_(r[4]), unit: String(r[5] || ''), brand: String(r[6] || '') })),
     prices: rows_('Precios', PRICE_HEADERS.length).slice(-5000).map((r) => ({ id: String(r[0]), product: String(r[1] || ''), day: ymd_(r[4]), price: num_(r[5]) })),
     recipe: getJSON_('COSTRECIPE', null),
   };
@@ -137,6 +137,7 @@ function supData_() {
 
 function writeAll_(name, headers, rows) {
   const sh = sheet_(name, headers);
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]); // por si se agregó una columna nueva (ej.: Marca)
   const n = sh.getLastRow();
   if (n > 1) sh.getRange(2, 1, n - 1, headers.length).clearContent();
   if (rows.length) sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
@@ -638,12 +639,12 @@ function doPost(e) {
       const supName = {};
       sups.forEach((s) => { supName[s.id] = s.name; });
       const prods = (Array.isArray(b.products) ? b.products : []).slice(0, 500)
-        .map((p) => ({ id: str_(p.id, 40), sup: str_(p.sup, 40), name: str_(p.name, 60).trim(), size: num_(p.size), unit: PROD_UNITS.indexOf(String(p.unit)) >= 0 ? String(p.unit) : 'unidad' }))
+        .map((p) => ({ id: str_(p.id, 40), sup: str_(p.sup, 40), name: str_(p.name, 60).trim(), brand: str_(p.brand, 40).trim(), size: num_(p.size), unit: PROD_UNITS.indexOf(String(p.unit)) >= 0 ? String(p.unit) : 'unidad' }))
         .filter((p) => p.id && p.name && supName[p.sup]);
       const prodById = {};
       prods.forEach((p) => { prodById[p.id] = p; });
       writeAll_('Proveedores', SUP_HEADERS, sups.map((s) => [s.id, s.name, s.phone, s.notes]));
-      writeAll_('Productos de proveedores', SPROD_HEADERS, prods.map((p) => [p.id, p.sup, supName[p.sup], p.name, p.size, p.unit]));
+      writeAll_('Productos de proveedores', SPROD_HEADERS, prods.map((p) => [p.id, p.sup, supName[p.sup], p.name, p.size, p.unit, p.brand]));
       const del = (Array.isArray(b.delPrices) ? b.delPrices : []).map(String);
       if (del.length) dropRows_('Precios', PRICE_HEADERS.length, (r) => del.indexOf(String(r[0])) >= 0);
       const add = (Array.isArray(b.addPrices) ? b.addPrices : []).filter((x) => x && prodById[String(x.product)] && /^\d{4}-\d{2}-\d{2}$/.test(String(x.day)) && num_(x.price) > 0);
