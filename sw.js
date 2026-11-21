@@ -1,4 +1,4 @@
-const VERSION = 'hidro-c4f6e6c8c54c';
+const VERSION = 'hidro-6d7c9d7dd7f6';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -13,12 +13,14 @@ self.addEventListener('activate', (e) => {
 });
 
 // Primero la red (para tener siempre la última versión), y si no hay internet, el caché.
+// 'no-cache': siempre pregunta a la web si hay algo nuevo (si no cambió, la respuesta es mínima),
+// así una versión publicada llega al celular apenas se abre la app, sin esperar 10 minutos.
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
   if (url.origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
         const copy = res.clone();
         caches.open(VERSION).then((c) => c.put(e.request, copy));
