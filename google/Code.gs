@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -193,7 +193,30 @@ function stockData_() {
   let since = null;
   rows.forEach((r) => { if (/^Tanque [ABC]$/.test(String(r[2])) && r[1] instanceof Date && (!since || r[1] < since)) since = r[1]; });
   if (since) { since = new Date(since); since.setHours(0, 0, 0, 0); }
-  return { ok: true, ledger: ledger, use: tankUse_(since) };
+  return { ok: true, ledger: ledger, use: tankUse_(since), orders: ordersData_() };
+}
+
+// ---------- Pedidos a proveedores (solo el dueño) ----------
+// Hoja "Pedidos": una fila por producto pedido. Los de un mismo pedido comparten el comienzo del ID (pedido~1, pedido~2...).
+// Estado: Pedido (esperando que llegue), Recibido (se cargó la compra) o Cancelado.
+const ORDER_HEADERS = ['ID', 'Fecha', 'Proveedor ID', 'Proveedor', 'Insumo', 'Producto ID', 'Cantidad', 'Presentación', 'Estado', 'Cargado el'];
+const ORDER_STATES = ['Pedido', 'Recibido', 'Cancelado'];
+
+function ordersData_() {
+  return rows_('Pedidos', ORDER_HEADERS.length).slice(-500).map((r) => ({
+    id: String(r[0]), day: ymd_(r[1]), sup: String(r[2] || ''), supName: String(r[3] || ''), item: String(r[4] || ''), product: String(r[5] || ''),
+    n: num_(r[6]), detail: String(r[7] || ''), status: String(r[8] || ''), at: iso_(r[9]),
+  }));
+}
+
+// Cambia el estado de todos los productos de un pedido (se escribe la columna de una vez)
+function setOrderState_(group, state) {
+  const sh = ss_().getSheetByName('Pedidos');
+  if (!group || !sh || sh.getLastRow() < 2) return;
+  const n = sh.getLastRow() - 1, ids = sh.getRange(2, 1, n, 1).getValues(), st = sh.getRange(2, 9, n, 1).getValues();
+  let changed = false;
+  ids.forEach((r, i) => { const id = String(r[0]); if (id === group || id.indexOf(group + '~') === 0) { st[i][0] = state; changed = true; } });
+  if (changed) sh.getRange(2, 9, n, 1).setValues(st);
 }
 
 // ---------- Fumigaciones ----------
@@ -737,6 +760,31 @@ function doPost(e) {
       });
       if (rows.length) { const sh = sheet_('Stock', STOCK_HEADERS); sh.getRange(sh.getLastRow() + 1, 1, rows.length, STOCK_HEADERS.length).setValues(rows); }
       if (prices.length) { const sh = sheet_('Precios', PRICE_HEADERS); sh.getRange(sh.getLastRow() + 1, 1, prices.length, PRICE_HEADERS.length).setValues(prices); }
+      if (b.orderDone) setOrderState_(str_(b.orderDone, 60), 'Recibido'); // la compra de un pedido que llegó
+      return out_(stockData_());
+    }
+
+    // Anotar un pedido hecho a un proveedor. El ID lo arma el celular: si llega dos veces, se guarda una sola.
+    if (b.action === 'orderadd') {
+      const o = b.order || {}, id = str_(o.id, 60), day = /^\d{4}-\d{2}-\d{2}$/.test(String(o.day)) ? String(o.day) : '';
+      const sups = {};
+      rows_('Proveedores', 2).forEach((r) => { sups[String(r[0])] = String(r[1] || ''); });
+      const items = (Array.isArray(o.items) ? o.items : []).slice(0, 60).filter((it) => it && str_(it.item, 60).trim() && num_(it.n) > 0);
+      if (!id || id.indexOf('~') >= 0 || !day || !sups[String(o.sup)] || !items.length) return out_({ ok: false, error: 'order' });
+      if (!rows_('Pedidos', 1).some((r) => String(r[0]).split('~')[0] === id)) {
+        const now = new Date(), sh = sheet_('Pedidos', ORDER_HEADERS);
+        sh.getRange(sh.getLastRow() + 1, 1, items.length, ORDER_HEADERS.length).setValues(items.map((it, i) => [
+          id + '~' + (i + 1), dayDate_(day), String(o.sup), sups[String(o.sup)], str_(it.item, 60).trim(), str_(it.product, 40), num_(it.n), str_(it.detail, 80), 'Pedido', now,
+        ]));
+      }
+      return out_(stockData_());
+    }
+
+    // Marcar un pedido como Recibido o Cancelado
+    if (b.action === 'orderset') {
+      const st = ORDER_STATES.indexOf(String(b.status)) >= 0 ? String(b.status) : '';
+      if (!st) return out_({ ok: false, error: 'order' });
+      setOrderState_(str_(b.group, 60), st);
       return out_(stockData_());
     }
 
