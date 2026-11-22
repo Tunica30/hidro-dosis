@@ -114,6 +114,7 @@ const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'sup', 'supset', 'fumadd
 // Empleados: las personas con acceso a Horas (ver "Personas y accesos" más abajo).
 const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 'Estado', 'Pagado el', 'Pago', 'Dispositivo', 'Cargado por'];
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
+const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el'];
 const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo', 'Para qué', 'Dosis', 'Carencia (días)', 'Se puede cosechar desde', 'Cargado por', 'Cargado el'];
 
 // ---------- Proveedores, productos y precios (solo el dueño) ----------
@@ -205,6 +206,16 @@ function fumRows_() {
   }));
 }
 
+// ---------- Cosechas ----------
+// Una fila por cosecha: el día, el grupo de tanques que se cosechó junto y cuántos paquetes rindió.
+// "mine" = la cargó este celular (la puede borrar). El número de dispositivo no sale de la planilla.
+function harvRows_(dev) {
+  return rows_('Cosechas', HARV_HEADERS.length).slice(-3000).map((r) => ({
+    id: String(r[0]), day: ymd_(r[1]), tanks: String(r[2] || ''), packs: num_(r[3]), note: String(r[4] || ''), by: String(r[5] || ''),
+    mine: !!dev && String(r[6]) === String(dev),
+  })).filter((x) => x.id && x.day);
+}
+
 function ymd_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, ss_().getSpreadsheetTimeZone(), 'yyyy-MM-dd');
   return String(v || '').slice(0, 10);
@@ -246,9 +257,42 @@ function links_() {
 function who_(devId) {
   const l = devId ? links_()[String(devId)] : null;
   if (!l) return null;
-  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true, fum: true };
+  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true, fum: true, wx: true, harv: true, sow: true };
   const p = people_().find((x) => x.id === l);
-  return p ? { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: p.fum === undefined ? !!p.tanks : !!p.fum } : null;
+  if (!p) return null;
+  const fum = p.fum === undefined ? !!p.tanks : !!p.fum;
+  // Cosechas: si nunca se tocó, la ve quien entra a Tanques o a Fumigaciones
+  // Plantines (siembra): si nunca se tocó, la ve quien entra a Tanques
+  return { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: fum, wx: p.wx !== false, harv: p.harv === undefined ? (!!p.tanks || fum) : !!p.harv,
+    sow: p.sow === undefined ? !!p.tanks : !!p.sow };
+}
+
+// ---------- Siembra de plantines (para quien tiene permiso de Plantines) ----------
+// Espumas fenólicas y semillas: productos de Proveedores cuyo nombre dice "espuma"/"fenólica" o "semilla".
+// Cada siembra son filas "Ajuste" en la hoja Stock con el detalle "Siembra de plantines: N bandejas · ... · cargó Nombre".
+const SOW_ITEM_RE = /espuma|fen[oó]l|semilla/i;
+const SOW_DETAIL_RE = /^Siembra de plantines: (\d+) bandeja/;
+function sowInfo_(me) {
+  const items = {};
+  rows_('Productos de proveedores', SPROD_HEADERS.length).forEach((r) => {
+    const n = String(r[3] || '').trim(), u = String(r[5] || ''), k = n.toLowerCase();
+    if (n && SOW_ITEM_RE.test(n) && !items[k]) items[k] = { name: n, unit: u === 'kg' || u === 'g' ? 'kg' : u === 'L' || u === 'ml' ? 'L' : 'unidad', qty: 0, known: false };
+  });
+  const rows = rows_('Stock', STOCK_HEADERS.length), groups = {}, order = [];
+  rows.forEach((r) => {
+    const it = items[String(r[2] || '').trim().toLowerCase()];
+    if (it) { it.known = true; it.qty = String(r[5]) === 'Conteo' ? num_(r[3]) : it.qty + num_(r[3]); }
+    const d = String(r[6] || ''), m = d.match(SOW_DETAIL_RE);
+    if (!m) return;
+    const g = String(r[0]).split('~')[0];
+    if (!groups[g]) { groups[g] = { id: g, day: ymd_(r[1]), trays: Number(m[1]), seed: '', seedG: 0, foam: '', placas: 0, detail: d, at: iso_(r[10]) }; order.push(g); }
+    if (String(r[4]) === 'kg') { groups[g].seed = String(r[2]); groups[g].seedG += -num_(r[3]) * 1000; } else { groups[g].foam = String(r[2]); groups[g].placas += -num_(r[3]); }
+  });
+  const log = order.slice(-15).reverse().map((g) => {
+    const x = groups[g], by = (x.detail.match(/ · cargó (.+)$/) || [])[1] || '';
+    return Object.assign(x, { by: by, mine: me.owner || (by === me.name && Date.now() - new Date(x.at).getTime() < 48 * 3600000) });
+  });
+  return { ok: true, items: Object.keys(items).map((k) => items[k]), log: log };
 }
 
 // Empleados para las horas: las personas con acceso a Horas
@@ -421,6 +465,18 @@ function doPost(e) {
     return out_({ ok: true, fum: fumRows_() });
   }
 
+  // Cosechas: las ve quien tiene permiso de Cosechas
+  if (b.action === 'harv') {
+    if (!me || !me.harv) return noAccess();
+    return out_({ ok: true, harv: harvRows_(b.id) });
+  }
+
+  // Siembra de plantines: espumas y semillas con lo que queda, y las últimas siembras
+  if (b.action === 'sowinfo') {
+    if (!me || !me.sow) return noAccess();
+    return out_(sowInfo_(me));
+  }
+
   if (b.action === 'day') {
     if (!me || !me.tanks) return noAccess();
     const s = ss_().getSheetByName('Mediciones');
@@ -486,6 +542,60 @@ function doPost(e) {
 
     if (['hoursadd', 'hoursdel'].indexOf(b.action) >= 0 && (!me || !me.hours)) return noAccess();
     if (['measure', 'done', 'undo'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
+
+    if (['harvadd', 'harvdel'].indexOf(b.action) >= 0 && (!me || !me.harv)) return noAccess();
+    if (['sowadd', 'sowdel'].indexOf(b.action) >= 0 && (!me || !me.sow)) return noAccess();
+
+    // Anotar una siembra de plantines: solo descuenta espumas y semillas (cantidades negativas). El ID lo arma el celular.
+    if (b.action === 'sowadd') {
+      const valid = {};
+      sowInfo_(me).items.forEach((it) => { valid[it.name.toLowerCase()] = it; });
+      const have = {};
+      rows_('Stock', 1).forEach((r) => { have[String(r[0])] = 1; });
+      const now = new Date(), rows = [];
+      (Array.isArray(b.moves) ? b.moves : []).slice(0, 4).forEach((m) => {
+        const id = str_(m.id, 60), day = /^\d{4}-\d{2}-\d{2}$/.test(String(m.day)) ? String(m.day) : '';
+        const it = valid[str_(m.item, 60).trim().toLowerCase()], qty = num_(m.qty), detail = str_(m.detail, 90);
+        if (!id || have[id] || !day || !it || !(qty < 0 && qty > -100000) || !SOW_DETAIL_RE.test(detail)) return;
+        rows.push([id, dayDate_(day), it.name, qty, it.unit, 'Ajuste', detail + ' · cargó ' + me.name, '', '', '', now]);
+        have[id] = 1;
+      });
+      if (rows.length) { const sh = sheet_('Stock', STOCK_HEADERS); sh.getRange(sh.getLastRow() + 1, 1, rows.length, STOCK_HEADERS.length).setValues(rows); }
+      return out_(sowInfo_(me));
+    }
+
+    // Borrar una siembra: el dueño cualquiera; los demás, solo las suyas de las últimas 48 horas
+    if (b.action === 'sowdel') {
+      const g = str_(b.group, 60), row = sowInfo_(me).log.find((x) => x.id === g);
+      if (!g || !row) return out_(sowInfo_(me));
+      if (!row.mine) return out_({ ok: false, error: 'mine' });
+      dropRows_('Stock', STOCK_HEADERS.length, (r) => String(r[0]) === g || String(r[0]).indexOf(g + '~') === 0);
+      return out_(sowInfo_(me));
+    }
+
+    // Anotar una cosecha. El ID lo arma el celular: si llega dos veces (reintento), se guarda una sola.
+    if (b.action === 'harvadd') {
+      const e = b.entry || {};
+      const id = str_(e.id, 60), day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.day)) ? String(e.day) : '';
+      const tanks = (Array.isArray(e.tanks) ? e.tanks : []).map((t) => String(t)).filter((t) => /^T\d$/.test(t) && TANK_NAMES[t]).map((t) => TANK_NAMES[t]);
+      const packs = Math.round(num_(e.packs));
+      if (!id || !day || !tanks.length || !(packs > 0 && packs <= 100000)) return out_({ ok: false, error: 'harv' });
+      const sh = sheet_('Cosechas', HARV_HEADERS);
+      if (!rows_('Cosechas', 1).some((r) => String(r[0]) === id)) {
+        sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date()]);
+        sh.getRange(sh.getLastRow(), 2).setNumberFormat('dd/mm/yyyy');
+      }
+      return out_({ ok: true, harv: harvRows_(b.id) });
+    }
+
+    // Borrar una cosecha: el dueño cualquiera; los demás, solo las que cargaron desde su celular
+    if (b.action === 'harvdel') {
+      const id = String(b.entry || '');
+      const row = rows_('Cosechas', HARV_HEADERS.length).find((r) => String(r[0]) === id);
+      if (row && !me.owner && String(row[6]) !== String(b.id)) return out_({ ok: false, error: 'mine' });
+      if (row) dropRows_('Cosechas', HARV_HEADERS.length, (r) => String(r[0]) === id);
+      return out_({ ok: true, harv: harvRows_(b.id) });
+    }
 
     if (b.action === 'hoursadd') {
       const e = b.entry || {};
@@ -745,7 +855,8 @@ function doPost(e) {
         if (code.length !== 6 || codes[code]) code = '';
         seen[name.toLowerCase()] = true;
         if (code) codes[code] = true;
-        list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours, fum: x.fum === undefined ? !!x.tanks : !!x.fum,
+        list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours, fum: x.fum === undefined ? !!x.tanks : !!x.fum, wx: x.wx !== false,
+          harv: x.harv === undefined ? (!!x.tanks || (x.fum === undefined ? !!x.tanks : !!x.fum)) : !!x.harv, sow: x.sow === undefined ? !!x.tanks : !!x.sow,
           rate: num_(x.rate), freq: x.freq === 'quincenal' ? 'quincenal' : x.freq === 'semanal' ? 'semanal' : '' });
       });
       const renames = {};
