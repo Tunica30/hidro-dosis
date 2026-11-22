@@ -209,11 +209,15 @@ function fumRows_() {
 // ---------- Cosechas ----------
 // Una fila por cosecha: el día, el grupo de tanques que se cosechó junto y cuántos paquetes rindió.
 // "mine" = la cargó este celular (la puede borrar). El número de dispositivo no sale de la planilla.
-function harvRows_(dev) {
+// El rendimiento es solo del dueño: a un empleado le llega únicamente lo que anotó él en las últimas 6 horas
+// (para que vea que se guardó y pueda corregir un error); después ya no lo ve más.
+const HARV_EMP_MS = 6 * 3600000;
+function harvFresh_(at) { return at instanceof Date && Date.now() - at.getTime() < HARV_EMP_MS; }
+function harvRows_(dev, all) {
   return rows_('Cosechas', HARV_HEADERS.length).slice(-3000).map((r) => ({
     id: String(r[0]), day: ymd_(r[1]), tanks: String(r[2] || ''), packs: num_(r[3]), note: String(r[4] || ''), by: String(r[5] || ''),
-    mine: !!dev && String(r[6]) === String(dev),
-  })).filter((x) => x.id && x.day);
+    mine: !!dev && String(r[6]) === String(dev), at: iso_(r[7]), fresh: harvFresh_(r[7]),
+  })).filter((x) => x.id && x.day && (all || (x.mine && x.fresh)));
 }
 
 function ymd_(v) {
@@ -263,7 +267,7 @@ function who_(devId) {
   const fum = p.fum === undefined ? !!p.tanks : !!p.fum;
   // Cosechas: si nunca se tocó, la ve quien entra a Tanques o a Fumigaciones
   // Plantines (siembra): si nunca se tocó, la ve quien entra a Tanques
-  return { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: fum, wx: p.wx !== false, harv: p.harv === undefined ? (!!p.tanks || fum) : !!p.harv,
+  return { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: fum, wx: p.wx !== false, harv: p.harv === true,
     sow: p.sow === undefined ? !!p.tanks : !!p.sow };
 }
 
@@ -471,10 +475,10 @@ function doPost(e) {
     return out_({ ok: true, fum: fumRows_() });
   }
 
-  // Cosechas: las ve quien tiene permiso de Cosechas
+  // Cosechas: el dueño ve todas (y el rendimiento); quien tiene permiso de Cosechas, solo las suyas
   if (b.action === 'harv') {
     if (!me || !me.harv) return noAccess();
-    return out_({ ok: true, harv: harvRows_(b.id) });
+    return out_({ ok: true, harv: harvRows_(b.id, me.owner) });
   }
 
   // Siembra de plantines: espumas y semillas con lo que queda, y las últimas siembras
@@ -591,16 +595,16 @@ function doPost(e) {
         sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date()]);
         sh.getRange(sh.getLastRow(), 2).setNumberFormat('dd/mm/yyyy');
       }
-      return out_({ ok: true, harv: harvRows_(b.id) });
+      return out_({ ok: true, harv: harvRows_(b.id, me.owner) });
     }
 
-    // Borrar una cosecha: el dueño cualquiera; los demás, solo las que cargaron desde su celular
+    // Borrar una cosecha: el dueño cualquiera; los demás, solo las que cargaron desde su celular en las últimas 6 horas
     if (b.action === 'harvdel') {
       const id = String(b.entry || '');
       const row = rows_('Cosechas', HARV_HEADERS.length).find((r) => String(r[0]) === id);
-      if (row && !me.owner && String(row[6]) !== String(b.id)) return out_({ ok: false, error: 'mine' });
+      if (row && !me.owner && (String(row[6]) !== String(b.id) || !harvFresh_(row[7]))) return out_({ ok: false, error: 'mine' });
       if (row) dropRows_('Cosechas', HARV_HEADERS.length, (r) => String(r[0]) === id);
-      return out_({ ok: true, harv: harvRows_(b.id) });
+      return out_({ ok: true, harv: harvRows_(b.id, me.owner) });
     }
 
     if (b.action === 'hoursadd') {
@@ -862,7 +866,7 @@ function doPost(e) {
         seen[name.toLowerCase()] = true;
         if (code) codes[code] = true;
         list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours, fum: x.fum === undefined ? !!x.tanks : !!x.fum, wx: x.wx !== false,
-          harv: x.harv === undefined ? (!!x.tanks || (x.fum === undefined ? !!x.tanks : !!x.fum)) : !!x.harv, sow: x.sow === undefined ? !!x.tanks : !!x.sow,
+          harv: x.harv === true, sow: x.sow === undefined ? !!x.tanks : !!x.sow,
           rate: num_(x.rate), freq: x.freq === 'quincenal' ? 'quincenal' : x.freq === 'semanal' ? 'semanal' : '' });
       });
       const renames = {};
