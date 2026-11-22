@@ -268,15 +268,21 @@ function who_(devId) {
 }
 
 // ---------- Siembra de plantines (para quien tiene permiso de Plantines) ----------
-// Espumas fenólicas y semillas: productos de Proveedores cuyo nombre dice "espuma"/"fenólica" o "semilla".
+// Espumas fenólicas: productos cuyo nombre dice "espuma"/"fenólica".
+// Semillas: las que el dueño marcó en Proveedores ("Es semilla", va en CONFIG.sowSeed); si nunca se marcó,
+// las que se compran por peso y el nombre dice semilla, lechuga, rúcula, etc. (la misma regla está en la app).
 // Cada siembra son filas "Ajuste" en la hoja Stock con el detalle "Siembra de plantines: N bandejas · ... · cargó Nombre".
-const SOW_ITEM_RE = /espuma|fen[oó]l|semilla/i;
+const SOW_FOAM_RE = /espuma|fen[oó]l/i;
+const SOW_SEED_RE = /semilla|lechuga|r[uú]cula|albahaca|espinaca|acelga|kale|perejil|cilantro|ciboulette|cebolla|mostaza|mizuna|pak ?choi|radicchio|endivia|achicoria|berro|remolacha|brote/i;
 const SOW_DETAIL_RE = /^Siembra de plantines: (\d+) bandeja/;
 function sowInfo_(me) {
-  const items = {};
+  const items = {}, mark = (getJSON_('CONFIG', null) || {}).sowSeed || {};
   rows_('Productos de proveedores', SPROD_HEADERS.length).forEach((r) => {
     const n = String(r[3] || '').trim(), u = String(r[5] || ''), k = n.toLowerCase();
-    if (n && SOW_ITEM_RE.test(n) && !items[k]) items[k] = { name: n, unit: u === 'kg' || u === 'g' ? 'kg' : u === 'L' || u === 'ml' ? 'L' : 'unidad', qty: 0, known: false };
+    if (!n || items[k]) return;
+    const unit = u === 'kg' || u === 'g' ? 'kg' : u === 'L' || u === 'ml' ? 'L' : 'unidad', foam = SOW_FOAM_RE.test(n);
+    const seed = !foam && (Object.prototype.hasOwnProperty.call(mark, k) ? !!mark[k] : unit === 'kg' && SOW_SEED_RE.test(n));
+    if (foam || seed) items[k] = { name: n, unit: unit, qty: 0, known: false, seed: seed };
   });
   const rows = rows_('Stock', STOCK_HEADERS.length), groups = {}, order = [];
   rows.forEach((r) => {
