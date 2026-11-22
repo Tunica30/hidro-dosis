@@ -72,6 +72,9 @@ def main():
     # La misma versión va en sw.js y adentro de la app: así la app sabe con certeza si quedó vieja
     version = f"hidro-{os.urandom(6).hex()}"
     app = app.replace("__BUILD__", version)
+    # Cuándo se armó esta versión (se ve chiquito abajo a la derecha de la app)
+    from datetime import datetime
+    app = app.replace("__BUILT__", datetime.now().strftime("%d/%m/%Y %H:%M"))
     app = app.replace("__ADMIN__", json.dumps({"salt": secrets["admin_salt"], "hash": secrets["admin_hash"]}))
     app = app.replace("__LOG_URL__", secrets.get("log_url", ""))
 
