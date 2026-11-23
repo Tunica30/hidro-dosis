@@ -114,7 +114,8 @@ const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 
 // Empleados: las personas con acceso a Horas (ver "Personas y accesos" más abajo).
 const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 'Estado', 'Pagado el', 'Pago', 'Dispositivo', 'Cargado por'];
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
-const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el'];
+const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el', 'Cajones', 'Detalle cajones'];
+const HARV_BOX = 15; // paquetes en un cajón común
 const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo', 'Para qué', 'Dosis', 'Carencia (días)', 'Se puede cosechar desde', 'Cargado por', 'Cargado el'];
 
 // ---------- Proveedores, productos y precios (solo el dueño) ----------
@@ -240,6 +241,7 @@ function harvRows_(dev, all) {
   return rows_('Cosechas', HARV_HEADERS.length).slice(-3000).map((r) => ({
     id: String(r[0]), day: ymd_(r[1]), tanks: String(r[2] || ''), packs: num_(r[3]), note: String(r[4] || ''), by: String(r[5] || ''),
     mine: !!dev && String(r[6]) === String(dev), at: iso_(r[7]), fresh: harvFresh_(r[7]),
+    boxes: r[8] === '' || r[8] == null ? null : num_(r[8]), detail: String(r[9] || ''), // las cosechas viejas no tienen cajones
   })).filter((x) => x.id && x.day && (all || (x.mine && x.fresh)));
 }
 
@@ -611,11 +613,21 @@ function doPost(e) {
       const e = b.entry || {};
       const id = str_(e.id, 60), day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.day)) ? String(e.day) : '';
       const tanks = (Array.isArray(e.tanks) ? e.tanks : []).map((t) => String(t)).filter((t) => /^T\d$/.test(t) && TANK_NAMES[t]).map((t) => TANK_NAMES[t]);
-      const packs = Math.round(num_(e.packs));
+      // Se anota por cajones: los comunes son de 15 paquetes; si se usaron cajones más grandes, cuántos y de cuántos paquetes.
+      // Los paquetes se calculan acá. (Una app vieja todavía puede mandar solo "packs".)
+      const int = (v) => { const n = Math.round(num_(v)); return n > 0 ? n : 0; };
+      let packs, boxes = '', detail = '';
+      if (e.boxes !== undefined) {
+        const n = int(e.boxes), m = int(e.big), k = m ? int(e.bigSize) : 0;
+        if (n > 2000 || m > 2000 || (m && !(k > 0 && k <= 500))) return out_({ ok: false, error: 'harv' });
+        packs = n * HARV_BOX + m * k; boxes = n + m;
+        if (m) detail = (n ? n + ' de ' + HARV_BOX + ' + ' : '') + m + ' de ' + k;
+      } else packs = Math.round(num_(e.packs));
       if (!id || !day || !tanks.length || !(packs > 0 && packs <= 100000)) return out_({ ok: false, error: 'harv' });
       const sh = sheet_('Cosechas', HARV_HEADERS);
       if (!rows_('Cosechas', 1).some((r) => String(r[0]) === id)) {
-        sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date()]);
+        sh.getRange(1, 1, 1, HARV_HEADERS.length).setValues([HARV_HEADERS]); // por si la hoja es de antes de los cajones
+        sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date(), boxes, detail]);
         sh.getRange(sh.getLastRow(), 2).setNumberFormat('dd/mm/yyyy');
       }
       return out_({ ok: true, harv: harvRows_(b.id, me.owner) });
