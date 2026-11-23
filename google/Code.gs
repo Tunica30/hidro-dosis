@@ -114,7 +114,7 @@ const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 
 // Empleados: las personas con acceso a Horas (ver "Personas y accesos" más abajo).
 const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 'Estado', 'Pagado el', 'Pago', 'Dispositivo', 'Cargado por'];
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
-const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el', 'Cajones', 'Detalle cajones'];
+const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el', 'Cajones', 'Detalle cajones', 'Agujeros'];
 const HARV_BOX = 15; // paquetes en un cajón común
 const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo', 'Para qué', 'Dosis', 'Carencia (días)', 'Se puede cosechar desde', 'Cargado por', 'Cargado el'];
 
@@ -231,6 +231,28 @@ function fumRows_() {
 }
 
 // ---------- Cosechas ----------
+// "Agujeros": los agujeros de cada tanque el día que se anotó la cosecha ("T3=4000; T7=2500"). Quedan fijos:
+// si después el dueño cambia los agujeros de un tanque, solo cuenta para las cosechas nuevas.
+function holesOf_(names, have) { // names: "Tanque 3, Tanque 7"; have: lo que ya tiene la fila (no se cambia)
+  const cfg = (getJSON_('CONFIG', {}) || {}).holes || {};
+  const out = {};
+  String(have || '').split(/;\s*/).forEach((x) => { const p = x.split('='); if (p.length === 2 && Number(p[1]) > 0) out[p[0].trim()] = Number(p[1]); });
+  String(names || '').split(',').map((n) => n.trim()).forEach((n) => {
+    const id = Object.keys(TANK_NAMES).find((k) => TANK_NAMES[k] === n);
+    if (id && !out[id] && Number(cfg[id]) > 0) out[id] = Math.round(Number(cfg[id]));
+  });
+  return Object.keys(out).sort().map((k) => k + '=' + out[k]).join('; ');
+}
+// Al cargar o cambiar agujeros: completa solo los tanques que a una cosecha le faltan (lo que ya tenía no se toca)
+function fillHarvHoles_() {
+  const sh = ss_().getSheetByName('Cosechas');
+  if (!sh || sh.getLastRow() < 2) return;
+  sh.getRange(1, 1, 1, HARV_HEADERS.length).setValues([HARV_HEADERS]);
+  const n = sh.getLastRow() - 1, vals = sh.getRange(2, 1, n, HARV_HEADERS.length).getValues();
+  let changed = false;
+  const col = vals.map((r) => { const h = holesOf_(r[2], r[10]); if (h !== String(r[10] || '')) changed = true; return [h]; });
+  if (changed) sh.getRange(2, HARV_HEADERS.length, n, 1).setValues(col);
+}
 // Una fila por cosecha: el día, el grupo de tanques que se cosechó junto y cuántos paquetes rindió.
 // "mine" = la cargó este celular (la puede borrar). El número de dispositivo no sale de la planilla.
 // El rendimiento es solo del dueño: a un empleado le llega únicamente lo que anotó él en las últimas 6 horas
@@ -242,6 +264,7 @@ function harvRows_(dev, all) {
     id: String(r[0]), day: ymd_(r[1]), tanks: String(r[2] || ''), packs: num_(r[3]), note: String(r[4] || ''), by: String(r[5] || ''),
     mine: !!dev && String(r[6]) === String(dev), at: iso_(r[7]), fresh: harvFresh_(r[7]),
     boxes: r[8] === '' || r[8] == null ? null : num_(r[8]), detail: String(r[9] || ''), // las cosechas viejas no tienen cajones
+    holes: String(r[10] || ''),
   })).filter((x) => x.id && x.day && (all || (x.mine && x.fresh)));
 }
 
@@ -627,7 +650,7 @@ function doPost(e) {
       const sh = sheet_('Cosechas', HARV_HEADERS);
       if (!rows_('Cosechas', 1).some((r) => String(r[0]) === id)) {
         sh.getRange(1, 1, 1, HARV_HEADERS.length).setValues([HARV_HEADERS]); // por si la hoja es de antes de los cajones
-        sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date(), boxes, detail]);
+        sh.appendRow([id, dayDate_(day), tanks.join(', '), packs, str_(e.note, 120).trim(), me.name, str_(b.id, 40), new Date(), boxes, detail, holesOf_(tanks.join(', '), '')]);
         sh.getRange(sh.getLastRow(), 2).setNumberFormat('dd/mm/yyyy');
       }
       return out_({ ok: true, harv: harvRows_(b.id, me.owner) });
@@ -889,6 +912,7 @@ function doPost(e) {
     if (b.action === 'setconfig') {
       if (!b.config || typeof b.config !== 'object') return out_({ ok: false, error: 'config' });
       setJSON_('CONFIG', b.config);
+      if (b.config.holes) fillHarvHoles_();
       return out_({ ok: true });
     }
 
