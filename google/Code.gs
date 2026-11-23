@@ -576,7 +576,7 @@ function doPost(e) {
     }
 
     if (['hoursadd', 'hoursdel'].indexOf(b.action) >= 0 && (!me || !me.hours)) return noAccess();
-    if (['measure', 'done', 'undo'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
+    if (['measure', 'done', 'undo', 'tick'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
 
     if (['harvadd', 'harvdel'].indexOf(b.action) >= 0 && (!me || !me.harv)) return noAccess();
     if (['sowadd', 'sowdel'].indexOf(b.action) >= 0 && (!me || !me.sow)) return noAccess();
@@ -727,6 +727,21 @@ function doPost(e) {
       setJSON_('LAST', last);
       log().appendRow([now, str_(b.name, 30) || tank, last[tank].done.user, '', '', '', '', '', last[tank].summary, 'Corregido']);
       return out_({ ok: true, last: last[tank] });
+    }
+
+    // Tildar lo que ya se agregó a un tanque para corregir (agua, A, B, C...). Va con la medición: si el tanque
+    // se volvió a medir (t distinto), el tilde viejo no se guarda. Lo ven todos los celulares.
+    if (b.action === 'tick') {
+      const tank = str_(b.tank, 10), k = str_(b.k, 20);
+      const last = getJSON_('LAST', {}), e = last[tank];
+      if (!e || !k) return out_({ ok: false, error: 'tank' });
+      if (String(b.t) !== String(e.time)) return out_({ ok: true, last: e });
+      const ticks = e.ticks && typeof e.ticks === 'object' ? e.ticks : {};
+      if (b.on) ticks[k] = { time: (b.time ? new Date(b.time) : new Date()).toISOString(), user: users_().nameOf(b.id) };
+      else delete ticks[k];
+      e.ticks = ticks;
+      setJSON_('LAST', last);
+      return out_({ ok: true, last: e });
     }
 
     // Deshacer la última corrección (of = 'done') o la última medición (of = 'measure', con la anterior en prev)
