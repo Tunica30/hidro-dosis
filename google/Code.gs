@@ -122,7 +122,7 @@ const HARV_BOX = 15; // paquetes en un cajón común
 // Ventas: el reparto de cada cosecha entre clientes (se reescribe entero cada vez que se guarda esa cosecha).
 // Gastos del mes: luz, monotributo y otros. Vehículo: combustible (con los km del tablero), service, seguro, patente, cubiertas.
 const CLI_HEADERS = ['ID', 'Cliente', 'Precio por paquete', 'Desde', 'Cargado el'];
-const SALE_HEADERS = ['ID', 'Cosecha', 'Fecha cosecha', 'Cliente ID', 'Cliente', 'Cajones', 'Paquetes', 'Precio por paquete', 'Total', 'Cargado el'];
+const SALE_HEADERS = ['ID', 'Cosecha', 'Fecha cosecha', 'Cliente ID', 'Cliente', 'Cajones', 'Paquetes', 'Precio por paquete', 'Total', 'Cargado el', 'Entregado'];
 const FCOST_HEADERS = ['ID', 'Mes', 'Tipo', 'Detalle', 'Monto', 'Cargado el'];
 const VEH_HEADERS = ['ID', 'Fecha', 'Tipo', 'Monto', 'Litros', 'Km', 'Detalle', 'Cargado el'];
 const VEH_TYPES = ['Combustible', 'Service', 'Seguro', 'Patente', 'Cubiertas'];
@@ -130,7 +130,7 @@ function finData_() {
   return {
     ok: true,
     clients: rows_('Clientes', CLI_HEADERS.length).map((r) => ({ id: String(r[0]), name: String(r[1] || ''), price: num_(r[2]), since: ymd_(r[3]) })).filter((x) => x.id && x.name),
-    sales: rows_('Ventas', SALE_HEADERS.length).slice(-6000).map((r) => ({ id: String(r[0]), harvest: String(r[1]), day: ymd_(r[2]), client: String(r[3]), name: String(r[4] || ''), boxes: num_(r[5]), packs: num_(r[6]), price: num_(r[7]), total: num_(r[8]) })).filter((x) => x.id && x.harvest),
+    sales: rows_('Ventas', SALE_HEADERS.length).slice(-6000).map((r) => ({ id: String(r[0]), harvest: String(r[1]), day: ymd_(r[2]), client: String(r[3]), name: String(r[4] || ''), boxes: num_(r[5]), packs: num_(r[6]), price: num_(r[7]), total: num_(r[8]), delivered: String(r[10] || '') })).filter((x) => x.id && x.harvest),
     costs: rows_('Gastos del mes', FCOST_HEADERS.length).map((r) => ({ id: String(r[0]), month: String(r[1]).slice(0, 7), type: String(r[2] || ''), detail: String(r[3] || ''), amount: num_(r[4]) })).filter((x) => x.id && /^\d{4}-\d{2}$/.test(x.month)),
     veh: rows_('Vehículo', VEH_HEADERS.length).map((r) => ({ id: String(r[0]), day: ymd_(r[1]), type: String(r[2] || ''), amount: num_(r[3]), liters: num_(r[4]), km: num_(r[5]), detail: String(r[6] || '') })).filter((x) => x.id && x.day),
   };
@@ -627,17 +627,17 @@ function doPost(e) {
     if (['measure', 'done', 'undo', 'tick'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
 
     if (['harvadd', 'harvdel'].indexOf(b.action) >= 0 && (!me || !me.harv)) return noAccess();
-    if (['fuelinfo', 'fueladd'].indexOf(b.action) >= 0 && (!me || !me.fuel)) return noAccess();
+    if (['fuelinfo', 'fueladd', 'delivset'].indexOf(b.action) >= 0 && (!me || !me.fuel)) return noAccess();
 
     // Entregas para el reparto: las cosechas de los últimos 14 días que el dueño ya repartió entre clientes (sin precios)
     const delivs_ = () => {
-      const from = new Date(Date.now() - 14 * 86400000), tanks = {}, by = {}, order = [];
+      const from = new Date(Date.now() - 30 * 86400000), tanks = {}, by = {}, order = [];
       rows_('Cosechas', 3).forEach((r) => { tanks[String(r[0])] = String(r[2] || ''); });
       rows_('Ventas', SALE_HEADERS.length).forEach((r) => {
         if (!(r[2] instanceof Date) || r[2] < from || !(num_(r[5]) > 0)) return;
         const h = String(r[1]);
         if (!by[h]) { by[h] = { day: ymd_(r[2]), tanks: tanks[h] || '', items: [] }; order.push(h); }
-        by[h].items.push({ name: String(r[4] || ''), boxes: num_(r[5]) });
+        by[h].items.push({ id: String(r[0]), name: String(r[4] || ''), boxes: num_(r[5]), done: String(r[10] || '') });
       });
       return order.map((h) => by[h]).sort((a, b) => (a.day < b.day ? 1 : -1));
     };
@@ -649,6 +649,16 @@ function doPost(e) {
         .map((x) => ({ day: x.day, amount: x.amount, liters: x.liters, km: x.km, by: (x.detail.match(/^cargó (.+)$/) || [])[1] || '' })), deliv: delivs_() };
     };
     if (b.action === 'fuelinfo') return out_(fuelInfo());
+    // Marcar (o desmarcar) una entrega como hecha
+    if (b.action === 'delivset') {
+      const id = str_(b.sale, 70), sh = ss_().getSheetByName('Ventas');
+      if (id && sh && sh.getLastRow() > 1) {
+        sh.getRange(1, 1, 1, SALE_HEADERS.length).setValues([SALE_HEADERS]);
+        const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues(), i = ids.findIndex((r) => String(r[0]) === id);
+        if (i >= 0) sh.getRange(i + 2, SALE_HEADERS.length).setValue(b.on ? Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM HH:mm') + ' · ' + me.name : '');
+      }
+      return out_(fuelInfo());
+    }
     if (b.action === 'fueladd') {
       const e = b.entry || {}, id = str_(e.id, 40);
       if (!id || !okDay_(e.day) || !(num_(e.amount) > 0) || !(num_(e.km) > 0)) return out_({ ok: false, error: 'fuel' });
@@ -855,10 +865,13 @@ function doPost(e) {
       // Reparto de una cosecha: se borra el anterior de esa cosecha y se guarda el nuevo
       if (b.sale && str_(b.sale.harvest, 60)) {
         const h = str_(b.sale.harvest, 60);
+        const done = {};
+        rows_('Ventas', SALE_HEADERS.length).forEach((r) => { if (String(r[1]) === h && r[10]) done[String(r[3])] = String(r[10]); });
         dropRows_('Ventas', SALE_HEADERS.length, (r) => String(r[1]) === h);
+        sheet_('Ventas', SALE_HEADERS).getRange(1, 1, 1, SALE_HEADERS.length).setValues([SALE_HEADERS]); // por si la hoja es de antes de "Entregado"
         addRows_('Ventas', SALE_HEADERS, (Array.isArray(b.sale.rows) ? b.sale.rows : []).slice(0, 30)
           .filter((x) => x && num_(x.boxes) > 0 && okDay_(b.sale.day))
-          .map((x, i) => [h + '~' + (i + 1), h, dayDate_(String(b.sale.day)), str_(x.client, 40), str_(x.name, 60), num_(x.boxes), num_(x.packs), num_(x.price), Math.round(num_(x.packs) * num_(x.price)), now]));
+          .map((x, i) => [h + '~' + (i + 1), h, dayDate_(String(b.sale.day)), str_(x.client, 40), str_(x.name, 60), num_(x.boxes), num_(x.packs), num_(x.price), Math.round(num_(x.packs) * num_(x.price)), now, done[str_(x.client, 40)] || '']));
       }
       // Gastos del mes y del vehículo: agregar o borrar
       const costDel = (Array.isArray(b.costDel) ? b.costDel : []).map(String);
