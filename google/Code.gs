@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['fin', 'finset', 'stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -116,6 +116,31 @@ const HOURS_HEADERS = ['ID', 'Cargado', 'Día', 'Empleado', 'Horas', 'Trabajo', 
 const PAY_HEADERS = ['ID', 'Fecha', 'Empleado', 'Horas', 'Valor hora', 'Total', 'Desde', 'Hasta', 'Cargas', 'Pagado por', 'Estado'];
 const HARV_HEADERS = ['ID', 'Fecha', 'Tanques', 'Paquetes', 'Nota', 'Cargado por', 'Dispositivo', 'Cargado el', 'Cajones', 'Detalle cajones', 'Agujeros'];
 const HARV_BOX = 15; // paquetes en un cajón común
+
+// ---------- Finanzas (solo el dueño) ----------
+// Clientes: una fila por precio (si cambia el precio, se agrega otra fila con la fecha desde la que vale).
+// Ventas: el reparto de cada cosecha entre clientes (se reescribe entero cada vez que se guarda esa cosecha).
+// Gastos del mes: luz, monotributo y otros. Vehículo: combustible (con los km del tablero), service, seguro, patente, cubiertas.
+const CLI_HEADERS = ['ID', 'Cliente', 'Precio por paquete', 'Desde', 'Cargado el'];
+const SALE_HEADERS = ['ID', 'Cosecha', 'Fecha cosecha', 'Cliente ID', 'Cliente', 'Cajones', 'Paquetes', 'Precio por paquete', 'Total', 'Cargado el'];
+const FCOST_HEADERS = ['ID', 'Mes', 'Tipo', 'Detalle', 'Monto', 'Cargado el'];
+const VEH_HEADERS = ['ID', 'Fecha', 'Tipo', 'Monto', 'Litros', 'Km', 'Detalle', 'Cargado el'];
+const VEH_TYPES = ['Combustible', 'Service', 'Seguro', 'Patente', 'Cubiertas'];
+function finData_() {
+  return {
+    ok: true,
+    clients: rows_('Clientes', CLI_HEADERS.length).map((r) => ({ id: String(r[0]), name: String(r[1] || ''), price: num_(r[2]), since: ymd_(r[3]) })).filter((x) => x.id && x.name),
+    sales: rows_('Ventas', SALE_HEADERS.length).slice(-6000).map((r) => ({ id: String(r[0]), harvest: String(r[1]), day: ymd_(r[2]), client: String(r[3]), name: String(r[4] || ''), boxes: num_(r[5]), packs: num_(r[6]), price: num_(r[7]), total: num_(r[8]) })).filter((x) => x.id && x.harvest),
+    costs: rows_('Gastos del mes', FCOST_HEADERS.length).map((r) => ({ id: String(r[0]), month: String(r[1]).slice(0, 7), type: String(r[2] || ''), detail: String(r[3] || ''), amount: num_(r[4]) })).filter((x) => x.id && /^\d{4}-\d{2}$/.test(x.month)),
+    veh: rows_('Vehículo', VEH_HEADERS.length).map((r) => ({ id: String(r[0]), day: ymd_(r[1]), type: String(r[2] || ''), amount: num_(r[3]), liters: num_(r[4]), km: num_(r[5]), detail: String(r[6] || '') })).filter((x) => x.id && x.day),
+  };
+}
+function addRows_(name, headers, rows) {
+  if (!rows.length) return;
+  const sh = sheet_(name, headers);
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+const okDay_ = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
 const FUM_HEADERS = ['ID', 'Fumigación', 'Fecha', 'Tanques', 'Producto', 'Tipo', 'Para qué', 'Dosis', 'Carencia (días)', 'Se puede cosechar desde', 'Cargado por', 'Cargado el'];
 
 // ---------- Proveedores, productos y precios (solo el dueño) ----------
@@ -309,14 +334,14 @@ function links_() {
 function who_(devId) {
   const l = devId ? links_()[String(devId)] : null;
   if (!l) return null;
-  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true, fum: true, wx: true, harv: true, sow: true };
+  if (l === 'OWNER') return { name: 'Dueño', owner: true, tanks: true, hours: true, fum: true, wx: true, harv: true, sow: true, fuel: true };
   const p = people_().find((x) => x.id === l);
   if (!p) return null;
   const fum = p.fum === undefined ? !!p.tanks : !!p.fum;
   // Cosechas: si nunca se tocó, la ve quien entra a Tanques o a Fumigaciones
   // Plantines (siembra): si nunca se tocó, la ve quien entra a Tanques
   return { name: p.name, owner: false, tanks: !!p.tanks, hours: !!p.hours, fum: fum, wx: p.wx !== false, harv: p.harv === true,
-    sow: p.sow === undefined ? !!p.tanks : !!p.sow };
+    sow: p.sow === undefined ? !!p.tanks : !!p.sow, fuel: p.fuel === true };
 }
 
 // ---------- Siembra de plantines (para quien tiene permiso de Plantines) ----------
@@ -602,6 +627,35 @@ function doPost(e) {
     if (['measure', 'done', 'undo', 'tick'].indexOf(b.action) >= 0 && (!me || !me.tanks)) return noAccess();
 
     if (['harvadd', 'harvdel'].indexOf(b.action) >= 0 && (!me || !me.harv)) return noAccess();
+    if (['fuelinfo', 'fueladd'].indexOf(b.action) >= 0 && (!me || !me.fuel)) return noAccess();
+
+    // Entregas para el reparto: las cosechas de los últimos 14 días que el dueño ya repartió entre clientes (sin precios)
+    const delivs_ = () => {
+      const from = new Date(Date.now() - 14 * 86400000), tanks = {}, by = {}, order = [];
+      rows_('Cosechas', 3).forEach((r) => { tanks[String(r[0])] = String(r[2] || ''); });
+      rows_('Ventas', SALE_HEADERS.length).forEach((r) => {
+        if (!(r[2] instanceof Date) || r[2] < from || !(num_(r[5]) > 0)) return;
+        const h = String(r[1]);
+        if (!by[h]) { by[h] = { day: ymd_(r[2]), tanks: tanks[h] || '', items: [] }; order.push(h); }
+        by[h].items.push({ name: String(r[4] || ''), boxes: num_(r[5]) });
+      });
+      return order.map((h) => by[h]).sort((a, b) => (a.day < b.day ? 1 : -1));
+    };
+    // Combustible (chofer o dueño): los km del tablero de la última carga y las últimas cargas
+    const fuelInfo = () => {
+      const rows = rows_('Vehículo', VEH_HEADERS.length).map((r) => ({ id: String(r[0]), day: ymd_(r[1]), type: String(r[2] || ''), amount: num_(r[3]), liters: num_(r[4]), km: num_(r[5]), detail: String(r[6] || '') }));
+      const km = rows.filter((x) => x.km > 0).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.km - b.km)).pop();
+      return { ok: true, lastKm: km ? km.km : 0, loads: rows.filter((x) => x.type === 'Combustible').sort((a, b) => (a.day < b.day ? 1 : -1)).slice(0, 8)
+        .map((x) => ({ day: x.day, amount: x.amount, liters: x.liters, km: x.km, by: (x.detail.match(/^cargó (.+)$/) || [])[1] || '' })), deliv: delivs_() };
+    };
+    if (b.action === 'fuelinfo') return out_(fuelInfo());
+    if (b.action === 'fueladd') {
+      const e = b.entry || {}, id = str_(e.id, 40);
+      if (!id || !okDay_(e.day) || !(num_(e.amount) > 0) || !(num_(e.km) > 0)) return out_({ ok: false, error: 'fuel' });
+      if (!rows_('Vehículo', 1).some((r) => String(r[0]) === id))
+        addRows_('Vehículo', VEH_HEADERS, [[id, dayDate_(String(e.day)), 'Combustible', num_(e.amount), num_(e.liters) || '', num_(e.km), 'cargó ' + me.name, new Date()]]);
+      return out_(fuelInfo());
+    }
     if (['sowadd', 'sowdel'].indexOf(b.action) >= 0 && (!me || !me.sow)) return noAccess();
 
     // Anotar una siembra de plantines: solo descuenta espumas y semillas (cantidades negativas). El ID lo arma el celular.
@@ -640,13 +694,14 @@ function doPost(e) {
       // Los paquetes se calculan acá. (Una app vieja todavía puede mandar solo "packs".)
       const int = (v) => { const n = Math.round(num_(v)); return n > 0 ? n : 0; };
       let packs, boxes = '', detail = '';
-      if (e.boxes !== undefined) {
+      if (e.lost) { packs = 0; boxes = 0; detail = 'perdida'; }
+      else if (e.boxes !== undefined) {
         const n = int(e.boxes), m = int(e.big), k = m ? int(e.bigSize) : 0;
         if (n > 2000 || m > 2000 || (m && !(k > 0 && k <= 500))) return out_({ ok: false, error: 'harv' });
         packs = n * HARV_BOX + m * k; boxes = n + m;
         if (m) detail = (n ? n + ' de ' + HARV_BOX + ' + ' : '') + m + ' de ' + k;
       } else packs = Math.round(num_(e.packs));
-      if (!id || !day || !tanks.length || !(packs > 0 && packs <= 100000)) return out_({ ok: false, error: 'harv' });
+      if (!id || !day || !tanks.length || !(e.lost || (packs > 0 && packs <= 100000))) return out_({ ok: false, error: 'harv' });
       const sh = sheet_('Cosechas', HARV_HEADERS);
       if (!rows_('Cosechas', 1).some((r) => String(r[0]) === id)) {
         sh.getRange(1, 1, 1, HARV_HEADERS.length).setValues([HARV_HEADERS]); // por si la hoja es de antes de los cajones
@@ -787,6 +842,37 @@ function doPost(e) {
     if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
 
     if (b.action === 'sup') return out_(supData_());
+
+    if (b.action === 'fin') return out_(finData_());
+    if (b.action === 'finset') {
+      const now = new Date();
+      // Clientes: alta o precio nuevo (una fila más), o borrar al cliente (todas sus filas)
+      const cliDel = (Array.isArray(b.cliDel) ? b.cliDel : []).map(String);
+      if (cliDel.length) dropRows_('Clientes', CLI_HEADERS.length, (r) => cliDel.indexOf(String(r[0])) >= 0);
+      addRows_('Clientes', CLI_HEADERS, (Array.isArray(b.cliAdd) ? b.cliAdd : []).slice(0, 50)
+        .filter((x) => x && str_(x.id, 40) && str_(x.name, 60).trim() && num_(x.price) >= 0 && okDay_(x.since))
+        .map((x) => [str_(x.id, 40), str_(x.name, 60).trim(), num_(x.price), dayDate_(String(x.since)), now]));
+      // Reparto de una cosecha: se borra el anterior de esa cosecha y se guarda el nuevo
+      if (b.sale && str_(b.sale.harvest, 60)) {
+        const h = str_(b.sale.harvest, 60);
+        dropRows_('Ventas', SALE_HEADERS.length, (r) => String(r[1]) === h);
+        addRows_('Ventas', SALE_HEADERS, (Array.isArray(b.sale.rows) ? b.sale.rows : []).slice(0, 30)
+          .filter((x) => x && num_(x.boxes) > 0 && okDay_(b.sale.day))
+          .map((x, i) => [h + '~' + (i + 1), h, dayDate_(String(b.sale.day)), str_(x.client, 40), str_(x.name, 60), num_(x.boxes), num_(x.packs), num_(x.price), Math.round(num_(x.packs) * num_(x.price)), now]));
+      }
+      // Gastos del mes y del vehículo: agregar o borrar
+      const costDel = (Array.isArray(b.costDel) ? b.costDel : []).map(String);
+      if (costDel.length) dropRows_('Gastos del mes', FCOST_HEADERS.length, (r) => costDel.indexOf(String(r[0])) >= 0);
+      addRows_('Gastos del mes', FCOST_HEADERS, (Array.isArray(b.costAdd) ? b.costAdd : []).slice(0, 20)
+        .filter((x) => x && str_(x.id, 40) && /^\d{4}-\d{2}$/.test(String(x.month)) && num_(x.amount) > 0)
+        .map((x) => [str_(x.id, 40), String(x.month), str_(x.type, 30), str_(x.detail, 80), num_(x.amount), now]));
+      const vehDel = (Array.isArray(b.vehDel) ? b.vehDel : []).map(String);
+      if (vehDel.length) dropRows_('Vehículo', VEH_HEADERS.length, (r) => vehDel.indexOf(String(r[0])) >= 0);
+      addRows_('Vehículo', VEH_HEADERS, (Array.isArray(b.vehAdd) ? b.vehAdd : []).slice(0, 20)
+        .filter((x) => x && str_(x.id, 40) && okDay_(x.day) && VEH_TYPES.indexOf(String(x.type)) >= 0 && num_(x.amount) >= 0)
+        .map((x) => [str_(x.id, 40), dayDate_(String(x.day)), String(x.type), num_(x.amount), num_(x.liters) || '', num_(x.km) || '', str_(x.detail, 80), now]));
+      return out_(finData_());
+    }
 
     if (b.action === 'stock') return out_(stockData_());
 
@@ -965,7 +1051,7 @@ function doPost(e) {
         seen[name.toLowerCase()] = true;
         if (code) codes[code] = true;
         list.push({ id: str_(x.id, 40) || Utilities.getUuid(), name: name, code: code, tanks: !!x.tanks, hours: !!x.hours, fum: x.fum === undefined ? !!x.tanks : !!x.fum, wx: x.wx !== false,
-          harv: x.harv === true, sow: x.sow === undefined ? !!x.tanks : !!x.sow,
+          harv: x.harv === true, sow: x.sow === undefined ? !!x.tanks : !!x.sow, fuel: x.fuel === true,
           rate: num_(x.rate), freq: x.freq === 'quincenal' ? 'quincenal' : x.freq === 'semanal' ? 'semanal' : '' });
       });
       const renames = {};
