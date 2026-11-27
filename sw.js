@@ -1,4 +1,4 @@
-const VERSION = 'hidro-a2e07aff678a';
+const VERSION = 'hidro-afb66dafa548';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
