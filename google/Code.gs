@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['fin', 'finset', 'stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['fin', 'finset', 'stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'activity', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -539,6 +539,26 @@ function doPost(e) {
       tank: one,
       rows: vals.reverse().map((r) => ({ time: r[0], tank: r[1], user: r[2], liters: r[3], ppm: r[4], target: r[5], stage: r[6], water: r[7], summary: r[8], status: r[9], ph: r[10], note: r[11] })),
     });
+  }
+
+  // Actividad del personal (solo el dueño): horas anotadas y lo que se hizo con los tanques en los últimos días
+  if (b.action === 'activity') {
+    if (!checkPin_(b.pin)) return out_({ ok: false, error: 'pin' });
+    const days = Math.min(62, Math.max(1, Math.round(num_(b.days)) || 30));
+    const from = new Date(Date.now() - days * 86400000);
+    const fromDay = ymd_(from);
+    const hours = rows_('Horas', HOURS_HEADERS.length)
+      .filter((r) => ymd_(r[2]) >= fromDay || (r[1] instanceof Date && r[1] >= from))
+      .map((r) => ({ id: String(r[0]), at: iso_(r[1]), day: ymd_(r[2]), emp: String(r[3]), hours: num_(r[4]), job: String(r[5]), by: String(r[10]) }));
+    const s = ss_().getSheetByName('Mediciones');
+    let tanks = [];
+    if (s && s.getLastRow() >= 2) {
+      const n = s.getLastRow(), start = Math.max(2, n - 2999);
+      tanks = s.getRange(start, 1, n - start + 1, COLS).getValues()
+        .filter((r) => r[0] instanceof Date && r[0] >= from)
+        .map((r) => ({ time: iso_(r[0]), tank: String(r[1]), user: String(r[2]), ppm: r[4], target: r[5], summary: String(r[8]), status: String(r[9]), note: String(r[11] || '') }));
+    }
+    return out_({ ok: true, days: days, hours: hours, tanks: tanks });
   }
 
   // Registro de un día (para todos): movimientos entre from y to
