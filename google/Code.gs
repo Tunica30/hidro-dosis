@@ -523,13 +523,13 @@ function doPost(e) {
 
   // Lectura rápida, sin bloqueo. Sin vínculo o sin permiso de tanques, no se mandan los tanques.
   if (b.action === 'state') {
-    return out_({ ok: true, who: me, config: getJSON_('CONFIG', null), last: me && me.tanks ? getJSON_('LAST', {}) : {}, me: me ? me.name : '', luz: me ? luzPub_(me.owner) : null });
+    return out_({ ok: true, who: me, config: getJSON_('CONFIG', null), last: me && me.tanks ? getJSON_('LAST', {}) : {}, me: me ? me.name : '', luz: me ? luzPub_(me.owner) : null, epe: me ? epePub_() : null });
   }
 
   // Estado de la luz (todos los vinculados): hay luz o no, tensión y potencia. El consumo lo ve solo el dueño.
   if (b.action === 'luzestado') {
     if (!me) return noAccess();
-    return out_({ ok: true, luz: luzPub_(me.owner) });
+    return out_({ ok: true, luz: luzPub_(me.owner), epe: epePub_() });
   }
 
   if (b.action === 'history') {
@@ -1212,7 +1212,7 @@ function doPost(e) {
       const c = getJSON_('LUZ_CFG', {}) || {};
       if (num_(b.lo) >= 150 && num_(b.lo) <= 230) c.lo = num_(b.lo);
       if (num_(b.hi) >= 220 && num_(b.hi) <= 280) c.hi = num_(b.hi);
-      if (b.tg && typeof b.tg === 'object') c.tg = { cut: !!b.tg.cut, back: !!b.tg.back, volt: !!b.tg.volt };
+      if (b.tg && typeof b.tg === 'object') c.tg = { cut: !!b.tg.cut, back: !!b.tg.back, volt: !!b.tg.volt, epe: b.tg.epe !== false };
       if (b.newToken) c.token = Utilities.getUuid().replace(/-/g, '').slice(0, 10).toUpperCase();
       // Precio del kWh: cada precio vale desde su fecha (si se carga otro el mismo día, lo reemplaza)
       c.prices = Array.isArray(c.prices) ? c.prices : [];
@@ -1224,6 +1224,7 @@ function doPost(e) {
       }
       if (b.priceDel) c.prices = c.prices.filter((x) => x.id !== String(b.priceDel));
       setJSON_('LUZ_CFG', c);
+      if (b.epeNow) revisarCortesEpe();
       const res = luzDatos_();
       if (b.test) res.test = luzAvisar_('Mensaje de prueba', 'Si leés esto, los avisos de la luz llegan bien.');
       return out_(res);
@@ -1531,16 +1532,110 @@ function luzDatos_() {
     .filter((x) => x.id && x.from);
   let watch = null;
   try { watch = ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === 'vigilarLuz'); } catch (e) {}
-  return { ok: true, live: luzPub_(true), cfg: { lo: cfg.lo, hi: cfg.hi, tg: cfg.tg, prices: cfg.prices, token: cfg.token }, days: days, series: series, cuts: cuts, watch: watch, tgOk: !!telegram_() };
+  return { ok: true, live: luzPub_(true), cfg: { lo: cfg.lo, hi: cfg.hi, tg: cfg.tg, prices: cfg.prices, token: cfg.token }, days: days, series: series, cuts: cuts, watch: watch, tgOk: !!telegram_(), epe: epePub_(), epeAll: ((getJSON_('EPE', {}) || {}).list || []) };
 }
 
 function quitarVigilanciaLuz() {
   ScriptApp.getProjectTriggers().forEach((t) => {
-    if (t.getHandlerFunction() === 'vigilarLuz') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === 'vigilarLuz' || t.getHandlerFunction() === 'revisarCortesEpe') ScriptApp.deleteTrigger(t);
   });
 }
 
 function instalarVigilanciaLuz() {
   quitarVigilanciaLuz();
   ScriptApp.newTrigger('vigilarLuz').timeBased().everyMinutes(1).create();
+  ScriptApp.newTrigger('revisarCortesEpe').timeBased().everyHours(1).create();
+  probarCortesEpe(); // la primera lectura de los cortes programados de la EPE, ya mismo
+}
+
+// ---------- Cortes programados de la EPE (Arroyo Seco) ----------
+// Lee lo mismo que muestra https://www.epe.santafe.gov.ar/institucional/trabajos-programados al elegir la localidad.
+// No es un servicio oficial: es el que usa la propia página, con la clave que viene dentro de ella. Si la EPE lo cambia,
+// la app muestra "no se pudieron leer los cortes de la EPE" y, después de un día sin poder leerlos, avisa por Telegram.
+// Corre cada hora (lo instala instalarVigilanciaLuz). Avisa por Telegram cada corte nuevo y lo recuerda
+// la noche anterior (desde las 19 h). Para probarlo a mano: ejecutá probarCortesEpe y mirá el registro.
+const EPE_LOC = 164; // Arroyo Seco (el número de la localidad en la página de la EPE)
+const EPE_NAME = 'Arroyo Seco';
+const EPE_URL = 'https://epe.santafe.gov.ar/institucional-api/cortes-programados/';
+const EPE_KEY = 'd745e6f4-6dd6-41b8-9a21-859e9bd1284b'; // la clave pública que usa la página de la EPE
+const EPE_DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+function epeId_(c) {
+  const d = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [c.day, c.from, c.to, c.zona].join('|'), Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(d).slice(0, 12);
+}
+function epeTxt_(c) {
+  const d = dayDate_(c.day);
+  return EPE_DIAS[d.getDay()] + ' ' + d.getDate() + '/' + (d.getMonth() + 1) + (c.dayEnd && c.dayEnd !== c.day ? ' al ' + Number(c.dayEnd.slice(8)) + '/' + Number(c.dayEnd.slice(5, 7)) : '') +
+    ', de ' + c.from + ' a ' + c.to + ' h' + (c.zona ? '\nZona: ' + c.zona : '') + (c.causa ? '\nCausa: ' + c.causa : '');
+}
+
+// Lee los cortes de hoy en adelante, guarda la lista y avisa lo nuevo
+function revisarCortesEpe() {
+  const E = getJSON_('EPE', {}) || {};
+  const now = new Date(), today = luzDay_(now);
+  let list;
+  try {
+    const res = UrlFetchApp.fetch(EPE_URL + EPE_LOC + '/' + today, { headers: { 'x-api-key': EPE_KEY, Accept: 'application/json' }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('la EPE respondió con el código ' + res.getResponseCode());
+    const j = JSON.parse(res.getContentText());
+    const cs = j && j.data && j.data.cortes;
+    if (!Array.isArray(cs)) throw new Error('la respuesta no trae la lista de cortes');
+    list = cs.map((c) => ({
+      day: String(c.fechaInicio || '').slice(0, 10), dayEnd: String(c.fechaFin || c.fechaInicio || '').slice(0, 10),
+      from: String(c.horaInicio || '').slice(0, 5), to: String(c.horaFin || '').slice(0, 5),
+      zona: str_(c.zona, 500).replace(/\s+/g, ' ').replace(/^-\s*/, '').trim(), causa: str_(c.causa, 150).trim(),
+    })).filter((c) => okDay_(c.day));
+    list.forEach((c) => { if (!okDay_(c.dayEnd)) c.dayEnd = c.day; c.id = epeId_(c); });
+  } catch (e) {
+    E.err = String((e && e.message) || e).slice(0, 150);
+    E.errAt = now.toISOString();
+    if (!E.errSent && (!E.okAt || now.getTime() - new Date(E.okAt).getTime() > 86400000)) {
+      if (E.okAt) luzAvisar_('No se pudieron leer los cortes de la EPE', 'Hace más de un día que la página de la EPE no responde como antes (' + E.err + '). Puede que la hayan cambiado: hay que revisar el script.');
+      E.errSent = !!E.okAt;
+    }
+    setJSON_('EPE', E);
+    return E;
+  }
+  const from60 = luzDay_(now.getTime() - 60 * 86400000), ids = {};
+  list.forEach((c) => { ids[c.id] = 1; });
+  // Quedan los ya pasados (para el registro de cortes); los de hoy en adelante, como los da la EPE ahora
+  E.list = (E.list || []).filter((c) => !ids[c.id] && c.dayEnd < today && c.day >= from60).concat(list)
+    .sort((a, b) => (a.day + a.from < b.day + b.from ? -1 : 1));
+  E.sent = E.sent || {}; E.rem = E.rem || {};
+  const cfg = luzCfg_();
+  const nuevos = list.filter((c) => !E.sent[c.id]);
+  if (nuevos.length && cfg.tg.epe !== false) {
+    luzAvisar_(nuevos.length === 1 ? 'Corte programado de la EPE' : nuevos.length + ' cortes programados de la EPE',
+      EPE_NAME + ':\n\n' + nuevos.map(epeTxt_).join('\n\n') + '\n\n(Se suspenden si hay mal tiempo.)');
+  }
+  nuevos.forEach((c) => { E.sent[c.id] = today; });
+  // Recordatorio la noche anterior
+  const hour = Number(Utilities.formatDate(now, luzTz_(), 'H')), tomorrow = luzDay_(now.getTime() + 86400000);
+  if (hour >= 19) {
+    const rem = list.filter((c) => c.day === tomorrow && !E.rem[c.id]);
+    if (rem.length && cfg.tg.epe !== false) luzAvisar_('Mañana hay corte programado', EPE_NAME + ':\n\n' + rem.map(epeTxt_).join('\n\n'));
+    rem.forEach((c) => { E.rem[c.id] = today; });
+  }
+  ['sent', 'rem'].forEach((k) => Object.keys(E[k]).forEach((id) => { if (E[k][id] < from60) delete E[k][id]; }));
+  E.okAt = now.toISOString(); E.err = ''; E.errSent = false;
+  setJSON_('EPE', E);
+  return E;
+}
+
+// Para la app (todos): los cortes de hoy en adelante
+function epePub_() {
+  const E = getJSON_('EPE', null);
+  if (!E) return null;
+  const today = luzDay_(new Date());
+  return { at: E.okAt || '', err: E.err || '', loc: EPE_NAME,
+    list: (E.list || []).filter((c) => c.dayEnd >= today).map((c) => ({ id: c.id, day: c.day, dayEnd: c.dayEnd, from: c.from, to: c.to, zona: c.zona, causa: c.causa })) };
+}
+
+// Ejecutalo desde el editor para ver qué lee de la EPE
+function probarCortesEpe() {
+  const E = revisarCortesEpe();
+  if (E.err) Logger.log('No se pudo leer: ' + E.err);
+  else Logger.log('Leído bien. Cortes de hoy en adelante en ' + EPE_NAME + ': ' + (epePub_().list.length || 'ninguno'));
+  (epePub_() || { list: [] }).list.forEach((c) => Logger.log('• ' + epeTxt_(c).replace(/\n/g, ' · ')));
 }
