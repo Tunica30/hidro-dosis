@@ -1639,3 +1639,10 @@ function probarCortesEpe() {
   else Logger.log('Leído bien. Cortes de hoy en adelante en ' + EPE_NAME + ': ' + (epePub_().list.length || 'ninguno'));
   (epePub_() || { list: [] }).list.forEach((c) => Logger.log('• ' + epeTxt_(c).replace(/\n/g, ' · ')));
 }
+
+// Ejecutala una vez desde el editor si un aviso dice que falta permiso para conectarse (UrlFetchApp) o mandar mails:
+// Google muestra el cartel "Se requiere autorización" para aceptar los permisos.
+function autorizarPermisos() {
+  UrlFetchApp.fetch('https://www.epe.santafe.gov.ar/institucional/trabajos-programados', { muteHttpExceptions: true });
+  Logger.log('Permisos listos. Mails que quedan hoy: ' + MailApp.getRemainingDailyQuota());
+}
