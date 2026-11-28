@@ -106,7 +106,7 @@ function isBlocked_(id) {
   return !!id && blockedIds_().indexOf(String(id)) >= 0;
 }
 
-const ADMIN_ACTIONS = ['fin', 'finset', 'stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'activity', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe'];
+const ADMIN_ACTIONS = ['fin', 'finset', 'stock', 'stockadd', 'stockdel', 'orderadd', 'orderset', 'sup', 'supset', 'fumadd', 'fumdel', 'history', 'activity', 'setconfig', 'list', 'rename', 'block', 'remove', 'people', 'setpeople', 'unlink', 'hoursadmin', 'hourspay', 'hoursunpay', 'paydel', 'hoursedit', 'empentries', 'empwipe', 'luzdatos', 'luzset'];
 
 // ---------- Horas de trabajo ----------
 // Hoja "Horas": una fila por carga. Estado "Pendiente" hasta que el dueño la paga; ahí pasa a "Pagado".
@@ -512,6 +512,8 @@ function doGet() {
 function doPost(e) {
   const b = JSON.parse(e.postData.contents);
   if (b.action === 'ping') return out_({ ok: true });
+  // Medidor de luz (ESP32): entra con su código, no con un celular vinculado
+  if (b.action === 'luz') return out_(luzRecibir_(b));
 
   // Un dispositivo bloqueado no lee ni guarda nada (en las acciones de ajustes, b.id es el dispositivo a modificar)
   if (ADMIN_ACTIONS.indexOf(b.action) < 0 && isBlocked_(b.id)) return out_({ ok: false, error: 'blocked' });
@@ -521,7 +523,13 @@ function doPost(e) {
 
   // Lectura rápida, sin bloqueo. Sin vínculo o sin permiso de tanques, no se mandan los tanques.
   if (b.action === 'state') {
-    return out_({ ok: true, who: me, config: getJSON_('CONFIG', null), last: me && me.tanks ? getJSON_('LAST', {}) : {}, me: me ? me.name : '' });
+    return out_({ ok: true, who: me, config: getJSON_('CONFIG', null), last: me && me.tanks ? getJSON_('LAST', {}) : {}, me: me ? me.name : '', luz: me ? luzPub_(me.owner) : null });
+  }
+
+  // Estado de la luz (todos los vinculados): hay luz o no, tensión y potencia. El consumo lo ve solo el dueño.
+  if (b.action === 'luzestado') {
+    if (!me) return noAccess();
+    return out_({ ok: true, luz: luzPub_(me.owner) });
   }
 
   if (b.action === 'history') {
@@ -1199,6 +1207,28 @@ function doPost(e) {
       return out_(adminReply_(b));
     }
 
+    if (b.action === 'luzdatos') return out_(luzDatos_());
+    if (b.action === 'luzset') {
+      const c = getJSON_('LUZ_CFG', {}) || {};
+      if (num_(b.lo) >= 150 && num_(b.lo) <= 230) c.lo = num_(b.lo);
+      if (num_(b.hi) >= 220 && num_(b.hi) <= 280) c.hi = num_(b.hi);
+      if (b.tg && typeof b.tg === 'object') c.tg = { cut: !!b.tg.cut, back: !!b.tg.back, volt: !!b.tg.volt };
+      if (b.newToken) c.token = Utilities.getUuid().replace(/-/g, '').slice(0, 10).toUpperCase();
+      // Precio del kWh: cada precio vale desde su fecha (si se carga otro el mismo día, lo reemplaza)
+      c.prices = Array.isArray(c.prices) ? c.prices : [];
+      const pa = b.priceAdd;
+      if (pa && okDay_(pa.since) && num_(pa.kwh) > 0 && num_(pa.fixed) >= 0) {
+        c.prices = c.prices.filter((x) => x.since !== String(pa.since));
+        c.prices.push({ id: str_(pa.id, 40) || 'kwh-' + pa.since, since: String(pa.since), kwh: num_(pa.kwh), fixed: num_(pa.fixed) });
+        c.prices.sort((x, y) => (x.since < y.since ? -1 : 1));
+      }
+      if (b.priceDel) c.prices = c.prices.filter((x) => x.id !== String(b.priceDel));
+      setJSON_('LUZ_CFG', c);
+      const res = luzDatos_();
+      if (b.test) res.test = luzAvisar_('Mensaje de prueba', 'Si leés esto, los avisos de la luz llegan bien.');
+      return out_(res);
+    }
+
     if (b.action === 'rename') {
       const u = users_();
       const r = u.rowOf(String(b.id));
@@ -1232,7 +1262,7 @@ function telegram_() {
 }
 
 // Manda el aviso por Telegram si está configurado; si no, por mail. Devuelve por dónde salió.
-function avisar_(titulo, texto) {
+function avisar_(titulo, texto, icono) {
   const tg = telegram_();
   if (!tg) {
     MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Hidroponia: ' + titulo, texto);
@@ -1242,7 +1272,7 @@ function avisar_(titulo, texto) {
     const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + tg.token + '/sendMessage', {
       method: 'post',
       contentType: 'application/json',
-      payload: JSON.stringify({ chat_id: chat, text: '💧 ' + titulo + '\n\n' + texto }),
+      payload: JSON.stringify({ chat_id: chat, text: (icono || '💧') + ' ' + titulo + '\n\n' + texto }),
       muteHttpExceptions: true,
     });
     if (res.getResponseCode() !== 200) throw new Error('Telegram no aceptó el mensaje para el chat ' + chat + ' (código ' + res.getResponseCode() + '). Revisá TELEGRAM_TOKEN y TELEGRAM_CHAT.');
@@ -1303,4 +1333,214 @@ function quitarAvisos() {
 function instalarAvisos() {
   quitarAvisos();
   ScriptApp.newTrigger('avisoPendientes').timeBased().everyMinutes(30).create();
+}
+
+// ---------- Control eléctrico: medidor PZEM-004T + ESP32 ----------
+// El ESP32 manda cada minuto un POST con { action: 'luz', token, v, vmin, vmax, a, w, kwh, hz, pf, up }:
+//   v/vmin/vmax tensión promedio, mínima y máxima del minuto (V) · a corriente (A) · w potencia (W)
+//   kwh el contador de energía del PZEM (no se borra al apagarse) · hz frecuencia · pf factor de potencia
+//   up segundos que lleva prendido el ESP32 (sirve para saber si se cortó la luz o solo internet)
+// El código (token) se genera en la app: Eléctrico › Ajustes.
+// Como el medidor no tiene batería, el corte se detecta acá: vigilarLuz corre cada minuto y,
+// si pasan 3 minutos sin datos, anota el corte y avisa por Telegram. Cuando vuelven los datos,
+// si el ESP32 se reinició fue un corte de luz; si siguió prendido, se cortó internet o el wifi.
+// Activar la vigilancia: ejecutá instalarVigilanciaLuz una sola vez (usa el mismo Telegram que los otros avisos).
+//
+// Hojas: "Luz" (una fila cada 5 minutos), "Luz por día" (kWh de cada día) y "Cortes de luz".
+// Propiedades: LUZ_CFG (límites, avisos, precios del kWh, código) y LUZ_LIVE (último dato y cortes abiertos).
+const LUZ_HEADERS = ['Fecha', 'Tensión (V)', 'Mínima (V)', 'Máxima (V)', 'Corriente (A)', 'Potencia (W)', 'Contador (kWh)', 'Frecuencia (Hz)', 'Factor de potencia', 'Prendido hace (s)'];
+const LUZDIA_HEADERS = ['Día', 'kWh', 'Mínima (V)', 'Máxima (V)', 'Lecturas'];
+const CORTE_HEADERS = ['ID', 'Tipo', 'Desde', 'Hasta', 'Minutos', 'Detalle'];
+const LUZ_GAP_MS = 3 * 60000; // 3 minutos sin datos = corte
+const LUZ_ROW_MS = 5 * 60000; // una fila en "Luz" cada 5 minutos
+const LUZ_HYST = 2; // la tensión vuelve a lo normal con 2 V de margen (así no avisa a cada rato)
+
+function luzCfg_() {
+  const c = getJSON_('LUZ_CFG', {}) || {};
+  return {
+    lo: num_(c.lo) || 200, hi: num_(c.hi) || 240,
+    tg: Object.assign({ cut: true, back: true, volt: true }, c.tg || {}),
+    prices: Array.isArray(c.prices) ? c.prices : [], token: String(c.token || ''),
+  };
+}
+function luzTz_() { return Session.getScriptTimeZone(); }
+function luzDay_(d) { return Utilities.formatDate(new Date(d), luzTz_(), 'yyyy-MM-dd'); }
+function luzHm_(d) { return Utilities.formatDate(new Date(d), luzTz_(), 'HH:mm'); }
+function luzWhen_(d) { return luzDay_(d) === luzDay_(new Date()) ? luzHm_(d) : Utilities.formatDate(new Date(d), luzTz_(), 'dd/MM HH:mm'); }
+function luzDur_(ms) {
+  const m = Math.max(1, Math.round(ms / 60000));
+  return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+}
+function luzN_(n) { return String(Math.round(num_(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+
+// Manda el aviso de la luz. Nunca corta el guardado: si Telegram falla, devuelve false.
+function luzAvisar_(titulo, texto) {
+  try { return avisar_(titulo, texto, '⚡') === 'Telegram'; } catch (e) { return false; }
+}
+
+function luzCorteAdd_(id, tipo, desde, detalle) {
+  addRows_('Cortes de luz', CORTE_HEADERS, [[id, tipo, new Date(desde), '', '', detalle || '']]);
+}
+function luzCorteFin_(id, hasta, tipo, detalle) {
+  const sh = ss_().getSheetByName('Cortes de luz');
+  if (!sh || sh.getLastRow() < 2) return;
+  const n = sh.getLastRow(), st = Math.max(2, n - 499);
+  const vals = sh.getRange(st, 1, n - st + 1, CORTE_HEADERS.length).getValues();
+  for (let i = vals.length - 1; i >= 0; i--) {
+    if (String(vals[i][0]) !== id) continue;
+    const row = vals[i];
+    row[3] = new Date(hasta);
+    row[4] = Math.max(0, Math.round((new Date(hasta).getTime() - new Date(row[2]).getTime()) / 60000));
+    if (tipo) row[1] = tipo;
+    if (detalle != null) row[5] = detalle;
+    sh.getRange(st + i, 1, 1, CORTE_HEADERS.length).setValues([row]);
+    return;
+  }
+}
+
+// Lo que llega del ESP32
+function luzRecibir_(b) {
+  const cfg = luzCfg_();
+  if (!cfg.token || String(b.token || '').trim().toUpperCase() !== cfg.token) return { ok: false, error: 'token' };
+  const r = { v: num_(b.v), a: num_(b.a), w: num_(b.w), kwh: num_(b.kwh), hz: num_(b.hz), pf: num_(b.pf) };
+  const vmin = num_(b.vmin) || r.v, vmax = num_(b.vmax) || r.v;
+  const up = b.up == null || b.up === '' ? null : Math.max(0, num_(b.up));
+  const now = new Date(), t = now.getTime();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const L = getJSON_('LUZ_LIVE', {}) || {};
+    const prevAt = L.at ? new Date(L.at).getTime() : 0;
+    const boot = up == null ? null : t - up * 1000;
+
+    // 1) Vuelven los datos después de un corte que anotó la vigilancia
+    if (L.cut) {
+      const from = new Date(L.cut.from).getTime();
+      const net = boot != null && boot <= from + 10000; // el ESP32 ya estaba prendido antes del último dato: fue internet o el wifi
+      const end = boot != null && !net ? Math.max(from, boot) : t;
+      luzCorteFin_(L.cut.id, end, net ? 'Sin señal' : 'Corte', net ? 'El medidor siguió prendido: se cortó internet o el wifi, no la luz' : '');
+      if (cfg.tg.back) {
+        if (net) luzAvisar_('Volvió la señal del medidor', 'La luz no se cortó: fue internet o el wifi. Estuvo ' + luzDur_(t - from) + ' sin datos.\nAhora: ' + luzN_(r.v) + ' V · ' + luzN_(r.w) + ' W.');
+        else luzAvisar_('Volvió la luz', 'Volvió a las ' + luzHm_(end) + '. Estuvo cortada ' + luzDur_(end - from) + ' (desde las ' + luzWhen_(from) + ').\nTensión ' + luzN_(r.v) + ' V.');
+      }
+      L.cut = null;
+    } else if (prevAt && boot != null && boot > prevAt + 5000) {
+      // 2) Corte corto: el ESP32 se reinició entre dos datos y la vigilancia no llegó a verlo
+      luzCorteAdd_('corte-' + prevAt, 'Corte', prevAt, 'Corte corto: se anotó cuando volvió la luz');
+      luzCorteFin_('corte-' + prevAt, boot);
+      if (cfg.tg.back) luzAvisar_('Hubo un corte corto de luz', 'Entre las ' + luzHm_(prevAt) + ' y las ' + luzHm_(boot) + ' (' + luzDur_(boot - prevAt) + '). Ya volvió: ' + luzN_(r.v) + ' V.');
+    }
+
+    // 3) Tensión baja o alta (cada dato es el promedio de un minuto, así que ya es "sostenida")
+    if (L.ve) {
+      const low = L.ve.type === 'Baja tensión';
+      L.ve.ext = low ? Math.min(L.ve.ext, vmin) : Math.max(L.ve.ext, vmax);
+      const back = r.v > 0 && (low ? r.v >= cfg.lo + LUZ_HYST : r.v <= cfg.hi - LUZ_HYST);
+      if (back) {
+        luzCorteFin_(L.ve.id, t, null, (low ? 'Mínima ' : 'Máxima ') + luzN_(L.ve.ext) + ' V');
+        if (cfg.tg.volt) luzAvisar_('La tensión volvió a lo normal', luzN_(r.v) + ' V. Estuvo ' + (low ? 'baja' : 'alta') + ' ' + luzDur_(t - new Date(L.ve.from).getTime()) + ' (' + (low ? 'mínima ' : 'máxima ') + luzN_(L.ve.ext) + ' V).');
+        L.ve = null;
+      }
+    }
+    if (!L.ve && r.v > 0 && (r.v < cfg.lo || r.v > cfg.hi)) {
+      const low = r.v < cfg.lo, id = 'tension-' + t;
+      L.ve = { id: id, type: low ? 'Baja tensión' : 'Alta tensión', from: now.toISOString(), ext: low ? vmin : vmax };
+      luzCorteAdd_(id, L.ve.type, now, '');
+      if (cfg.tg.volt) luzAvisar_(low ? 'Baja tensión' : 'Alta tensión', 'La línea está en ' + luzN_(r.v) + ' V (' + (low ? 'menos de ' + cfg.lo : 'más de ' + cfg.hi) + ' V).');
+    }
+
+    // 4) kWh del día: suma lo que avanzó el contador del PZEM (si se reinició en 0, cuenta desde 0)
+    const day = luzDay_(now);
+    if (!L.d || L.d.day !== day) {
+      if (L.d && L.d.n) addRows_('Luz por día', LUZDIA_HEADERS, [[dayDate_(L.d.day), Math.round(L.d.kwh * 1000) / 1000, L.d.vmin || '', L.d.vmax || '', L.d.n]]);
+      L.d = { day: day, kwh: 0, vmin: 0, vmax: 0, n: 0 };
+    }
+    if (L.k != null && r.kwh >= 0) {
+      let dk = r.kwh - L.k;
+      if (dk < 0) dk = r.kwh;
+      if (dk < 1000) L.d.kwh += dk;
+    }
+    L.k = r.kwh;
+    if (r.v > 0) { L.d.vmin = L.d.vmin ? Math.min(L.d.vmin, vmin) : vmin; L.d.vmax = Math.max(L.d.vmax || 0, vmax); }
+    L.d.n++;
+
+    // 5) Una fila cada 5 minutos (para el gráfico y por si hay que revisar algo)
+    if (!L.row || t - new Date(L.row).getTime() >= LUZ_ROW_MS - 5000) {
+      addRows_('Luz', LUZ_HEADERS, [[now, r.v, vmin, vmax, r.a, r.w, r.kwh, r.hz, r.pf, up == null ? '' : up]]);
+      L.row = now.toISOString();
+    }
+    L.at = now.toISOString(); L.r = r; L.up = up;
+    setJSON_('LUZ_LIVE', L);
+    return { ok: true, lo: cfg.lo, hi: cfg.hi };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Corre cada minuto (activador). Si el medidor no manda datos hace más de 3 minutos, anota el corte y avisa.
+function vigilarLuz() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return;
+  try {
+    const L = getJSON_('LUZ_LIVE', {}) || {};
+    if (!L.at || L.cut) return;
+    const at = new Date(L.at).getTime();
+    if (Date.now() - at < LUZ_GAP_MS) return;
+    const cfg = luzCfg_(), id = 'corte-' + at, r = L.r || {};
+    luzCorteAdd_(id, 'Corte', at, '');
+    if (L.ve) { luzCorteFin_(L.ve.id, at, null, (L.ve.type === 'Baja tensión' ? 'Mínima ' : 'Máxima ') + luzN_(L.ve.ext) + ' V · terminó con el corte'); L.ve = null; }
+    L.cut = { id: id, from: L.at, v: r.v, w: r.w };
+    setJSON_('LUZ_LIVE', L); // se guarda antes de avisar: si Telegram tarda, no se anota dos veces
+    if (cfg.tg.cut) luzAvisar_('Se cortó la luz', 'El medidor del invernadero no manda datos desde las ' + luzWhen_(at) + '. Puede ser un corte de luz o de internet: cuando vuelva te aviso cuál fue.\nÚltimo dato: ' + luzN_(r.v) + ' V · ' + luzN_(r.w) + ' W.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Estado para la app. A los empleados: hay luz o no, tensión y potencia. Al dueño, también el consumo del día.
+function luzPub_(owner) {
+  const L = getJSON_('LUZ_LIVE', {}) || {};
+  if (!L.at) return null;
+  const r = L.r || {}, cfg = luzCfg_();
+  const o = { at: L.at, now: new Date().toISOString(), v: r.v, a: r.a, w: r.w, hz: r.hz, pf: r.pf, lo: cfg.lo, hi: cfg.hi,
+    cut: L.cut ? { from: L.cut.from, v: L.cut.v, w: L.cut.w } : null, ve: L.ve ? { type: L.ve.type, from: L.ve.from, ext: L.ve.ext } : null };
+  if (owner) {
+    o.kwh = r.kwh; o.up = L.up;
+    o.today = L.d && L.d.day === luzDay_(new Date()) ? { kwh: L.d.kwh, vmin: L.d.vmin, vmax: L.d.vmax } : null;
+  }
+  return o;
+}
+
+// Todo para el dueño: kWh por día, últimas 24 h, cortes y ajustes
+function luzDatos_() {
+  const cfg = luzCfg_(), L = getJSON_('LUZ_LIVE', {}) || {};
+  const days = rows_('Luz por día', LUZDIA_HEADERS.length).slice(-800)
+    .map((r) => ({ day: r[0] instanceof Date ? luzDay_(r[0]) : String(r[0]).slice(0, 10), kwh: num_(r[1]), vmin: num_(r[2]), vmax: num_(r[3]) }))
+    .filter((x) => okDay_(x.day));
+  if (L.d && L.d.n) days.push({ day: L.d.day, kwh: L.d.kwh, vmin: L.d.vmin, vmax: L.d.vmax, live: true });
+  let series = [];
+  const s = ss_().getSheetByName('Luz');
+  if (s && s.getLastRow() > 1) {
+    const n = s.getLastRow(), st = Math.max(2, n - 330), from = Date.now() - 86400000;
+    series = s.getRange(st, 1, n - st + 1, 6).getValues()
+      .filter((r) => r[0] instanceof Date && r[0].getTime() >= from)
+      .map((r) => [iso_(r[0]), num_(r[1]), num_(r[2]), num_(r[3]), num_(r[5])]);
+  }
+  const cuts = rows_('Cortes de luz', CORTE_HEADERS.length).slice(-800)
+    .map((r) => ({ id: String(r[0]), type: String(r[1] || ''), from: iso_(r[2]), to: r[3] instanceof Date ? iso_(r[3]) : '', min: num_(r[4]), detail: String(r[5] || '') }))
+    .filter((x) => x.id && x.from);
+  let watch = null;
+  try { watch = ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === 'vigilarLuz'); } catch (e) {}
+  return { ok: true, live: luzPub_(true), cfg: { lo: cfg.lo, hi: cfg.hi, tg: cfg.tg, prices: cfg.prices, token: cfg.token }, days: days, series: series, cuts: cuts, watch: watch, tgOk: !!telegram_() };
+}
+
+function quitarVigilanciaLuz() {
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === 'vigilarLuz') ScriptApp.deleteTrigger(t);
+  });
+}
+
+function instalarVigilanciaLuz() {
+  quitarVigilanciaLuz();
+  ScriptApp.newTrigger('vigilarLuz').timeBased().everyMinutes(1).create();
 }
